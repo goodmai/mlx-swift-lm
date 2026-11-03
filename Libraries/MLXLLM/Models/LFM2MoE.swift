@@ -294,22 +294,13 @@ class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
     /// Returns top-k experts and unbiased sigmoid routing weights.
     /// `expert_bias` affects selection only.
     func route(_ x: MLXArray) -> (indices: MLXArray, weights: MLXArray) {
-        let routingWeights = MLX.sigmoid(gate(x).asType(.float32))
-
-        let k = topK
-        let indices: MLXArray
-        if useExpertBias, let expertBias {
-            let selection = routingWeights + expertBias.asType(.float32)
-            indices = argPartition(-selection, kth: k - 1, axis: -1)[.ellipsis, ..<k]
-        } else {
-            indices = argPartition(-routingWeights, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+        let gates = gate(x)
+        var (indices, weights) = sigmoidBiasRouterTopK(
+            gates, bias: useExpertBias ? expertBias : nil, k: topK, normalize: normTopKProb,
+            fused: gates.size == gates.dim(-1))
+        if args.routedScalingFactor != 1 {
+            weights = weights * args.routedScalingFactor
         }
-
-        var weights = takeAlong(routingWeights, indices, axis: -1)
-        if normTopKProb {
-            weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-6)
-        }
-        weights = weights * args.routedScalingFactor
         return (indices, weights)
     }
 

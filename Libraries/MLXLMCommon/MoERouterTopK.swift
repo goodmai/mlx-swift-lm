@@ -52,7 +52,7 @@ private let routerTopKSource = """
         }
         for (int q = 0; q < K_; ++q) {
             T s = static_cast<T>(top_v[q]);
-            scores[row * K_ + q] = NORMALIZE_ ? (s / acc) : s;
+            scores[row * K_ + q] = NORMALIZE_ == 2 ? (s / (acc + static_cast<T>(1e-6f))) : NORMALIZE_ ? (s / acc) : s;
         }
     }
     """
@@ -101,7 +101,8 @@ package func fusedRouterTopK(
     values: MLXArray,
     k: Int,
     normalize: Bool,
-    order: FusedRouterTopKOrder
+    order: FusedRouterTopKOrder,
+    normalizationFloor: Bool = false
 ) -> (indices: MLXArray, scores: MLXArray) {
     precondition(selection.shape == values.shape, "router selection/value shapes must match")
     precondition(selection.dtype == values.dtype, "router selection/value dtypes must match")
@@ -118,7 +119,7 @@ package func fusedRouterTopK(
             ("T", selection.dtype),
             ("E_", e),
             ("K_", k),
-            ("NORMALIZE_", normalize ? 1 : 0),
+            ("NORMALIZE_", normalize ? (normalizationFloor ? 2 : 1) : 0),
             ("DESCENDING_", order == .descending ? 1 : 0),
         ],
         grid: (e, rows, 1),
@@ -164,4 +165,28 @@ package func moeRouterTopK(
         return fusedRouterTopK(gates, k: k, normalize: normalize)
     }
     return chainRouterTopK(gates, k: k, normalize: normalize)
+}
+
+/// Sigmoid router with a selection-only bias (LFM2 MoE, DeepSeek-V3 style):
+/// experts are picked on `sigmoid(gates) + bias`, weighted by the unbiased
+/// sigmoid, and optionally normalized with a `1e-6` floor. `fused` routes the
+/// selection, gather and normalization through one kernel; the result is
+/// bit-identical to the reference chain.
+public func sigmoidBiasRouterTopK(
+    _ gates: MLXArray, bias: MLXArray?, k: Int, normalize: Bool, fused: Bool
+) -> (indices: MLXArray, weights: MLXArray) {
+    let routingWeights = MLX.sigmoid(gates.asType(.float32))
+    let selection = bias.map { routingWeights + $0.asType(.float32) } ?? routingWeights
+    if fused, selection.dim(-1) <= maxFusedRouterExperts, k > 0, k <= selection.dim(-1) {
+        let out = fusedRouterTopK(
+            selection: selection, values: routingWeights, k: k, normalize: normalize,
+            order: .descending, normalizationFloor: true)
+        return (out.indices, out.scores)
+    }
+    let indices = argPartition(-selection, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+    var weights = takeAlong(routingWeights, indices, axis: -1)
+    if normalize {
+        weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-6)
+    }
+    return (indices, weights)
 }

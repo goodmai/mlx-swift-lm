@@ -460,11 +460,8 @@ private class Gemma4TextRouter: Module {
         let normed = MLXFast.rmsNorm(
             x, weight: (scale * rootSize).asType(x.dtype), eps: rmsNormEps)
         let scores = proj(normed)
-        let topKIndices = MLX.argPartition(scores, kth: -topKExperts, axis: -1)[
-            .ellipsis, (-topKExperts)...,
-        ]
-        var topKWeights = MLX.takeAlong(scores, topKIndices, axis: -1)
-        topKWeights = MLX.softmax(topKWeights, axis: -1)
+        let (topKIndices, selected) = moeRouterTopK(scores, k: topKExperts, normalize: false)
+        var topKWeights = MLX.softmax(selected, axis: -1)
         topKWeights = topKWeights * perExpertScale[topKIndices].asType(topKWeights.dtype)
         return (topKIndices, topKWeights)
     }
