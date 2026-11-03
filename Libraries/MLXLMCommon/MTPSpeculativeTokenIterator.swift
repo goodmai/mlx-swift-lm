@@ -80,6 +80,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// produces tokens, but they're conditioned on the wrong slot → less
     /// coherent drafts → lower acceptance, especially at higher blockSize.
     private var lastRoundAccepted: Int? = nil
+    private var draftDepth = 1
+    private var fullRounds = 0
 
     public var promptPrefillTime: TimeInterval = 0.0
     private var telemetry = SpeculativeDecodingTelemetry()
@@ -374,7 +376,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let remaining = maxTokens - tokenCount
             guard remaining > 0 else { return }
 
-            let draftBudget = Swift.min(remaining - 1, blockSize - 1)
+            let draftBudget = Swift.min(remaining - 1, draftDepth)
             guard draftBudget > 0 else {
                 if let token = passthroughStep() {
                     pendingTokens.append(token)
@@ -383,7 +385,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             }
             numDraft = draftBudget
         } else {
-            numDraft = blockSize - 1
+            numDraft = draftDepth
         }
 
         guard let state = mainState,
@@ -535,6 +537,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         proposedCount += numDraft
         acceptedCount += accepted
         lastRoundAccepted = accepted
+        fullRounds = accepted == numDraft ? fullRounds + 1 : 0
+        if accepted < numDraft {
+            draftDepth = 1
+        } else if fullRounds >= 4 {
+            draftDepth = Swift.min(numDraft + 1, blockSize - 1)
+            fullRounds = 0
+        }
         telemetry.recordRound(
             drafted: numDraft,
             accepted: accepted,
