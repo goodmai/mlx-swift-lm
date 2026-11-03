@@ -1585,7 +1585,7 @@ public class MambaCache: ArraysCache {
         var lengths: MLXArray?
     }
 
-    private var speculativeCheckpoint: SpeculativeCheckpoint?
+    private var speculativeCheckpoints: [SpeculativeCheckpoint] = []
 
     public init(leftPadding: [Int]? = nil) {
         super.init(size: 2, leftPadding: leftPadding)
@@ -1598,30 +1598,35 @@ public class MambaCache: ArraysCache {
         recurrentState: MLXArray,
         advancedBy tokenCount: Int
     ) {
-        speculativeCheckpoint = SpeculativeCheckpoint(
+        speculativeCheckpoints.append(SpeculativeCheckpoint(
             state: [convState, recurrentState],
             offset: offset,
             leftPadding: leftPadding.map { $0 - tokenCount },
-            lengths: lengths.map { $0 - tokenCount })
+            lengths: lengths.map { $0 - tokenCount }))
     }
 
     package var hasSpeculativeCheckpoint: Bool {
-        speculativeCheckpoint != nil
+        !speculativeCheckpoints.isEmpty
+    }
+
+    package var speculativeCheckpointCount: Int {
+        speculativeCheckpoints.count
     }
 
     @discardableResult
-    package func restoreSpeculativeCheckpoint() -> Bool {
-        guard let checkpoint = speculativeCheckpoint else { return false }
+    package func restoreSpeculativeCheckpoint(rewinding count: Int = 1) -> Bool {
+        guard count >= 1, count <= speculativeCheckpoints.count else { return false }
+        let checkpoint = speculativeCheckpoints[speculativeCheckpoints.count - count]
         cache = checkpoint.state
         offset = checkpoint.offset
         leftPadding = checkpoint.leftPadding
         lengths = checkpoint.lengths
-        speculativeCheckpoint = nil
+        speculativeCheckpoints.removeAll()
         return true
     }
 
     package func discardSpeculativeCheckpoint() {
-        speculativeCheckpoint = nil
+        speculativeCheckpoints.removeAll()
     }
 
     public override func copy() -> any KVCache {
@@ -2472,12 +2477,12 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
 package func rewindSpeculativePromptCache(
     _ cache: [KVCache], numTokens: Int
 ) -> Int {
-    guard numTokens == 1,
+    guard numTokens >= 1,
         cache.allSatisfy({ entry in
             if entry.isTrimmable {
                 return entry.offset >= numTokens
             }
-            return (entry as? MambaCache)?.hasSpeculativeCheckpoint == true
+            return ((entry as? MambaCache)?.speculativeCheckpointCount ?? 0) >= numTokens
         })
     else { return 0 }
 
@@ -2487,7 +2492,7 @@ package func rewindSpeculativePromptCache(
                 preconditionFailure("Speculative cache validation and rewind diverged")
             }
         } else {
-            guard (entry as? MambaCache)?.restoreSpeculativeCheckpoint() == true else {
+            guard (entry as? MambaCache)?.restoreSpeculativeCheckpoint(rewinding: numTokens) == true else {
                 preconditionFailure("Missing recurrent speculative checkpoint")
             }
         }

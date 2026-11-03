@@ -342,17 +342,18 @@ final class Qwen35GatedDeltaNet: Module {
     ) -> MLXArray {
         let convState =
             cache?[0] ?? zeroStates(batch: inputs.dim(0), dtype: inputs.dtype).conv
-        let (out, newConvState, newRecState, checkpoint) = forward(
+        let (out, newConvState, newRecState, checkpoints) = forward(
             inputs, convState: convState, recState: cache?[1], mask: mask,
             checkpointAfter: checkpointAfter)
         if let cache {
             cache[0] = newConvState
             cache[1] = newRecState
-            if let checkpoint, let checkpointAfter {
+            cache.discardSpeculativeCheckpoint()
+            for (index, checkpoint) in checkpoints.enumerated() {
                 cache.saveSpeculativeCheckpoint(
                     convState: checkpoint.conv,
                     recurrentState: checkpoint.recurrent,
-                    advancedBy: checkpointAfter)
+                    advancedBy: index + 1)
             }
             cache.advance(inputs.dim(1))
         }
@@ -381,7 +382,7 @@ final class Qwen35GatedDeltaNet: Module {
         output: MLXArray,
         convState: MLXArray,
         recurrentState: MLXArray,
-        checkpoint: (conv: MLXArray, recurrent: MLXArray)?
+        checkpoints: [(conv: MLXArray, recurrent: MLXArray)]
     ) {
         let B = x.dim(0)
         let S = x.dim(1)
@@ -414,64 +415,38 @@ final class Qwen35GatedDeltaNet: Module {
             MLXArray(invScale).asType(dtype)
             * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: 1e-6)
 
-        let out: MLXArray
-        let newRecState: MLXArray
-        let checkpoint: (conv: MLXArray, recurrent: MLXArray)?
-        if let split = checkpointAfter, split > 0, split < S {
-            let prefixMask = mask.map { $0[0..., ..<split] }
-            let suffixMask = mask.map { $0[0..., split...] }
-            let (prefixOut, prefixState) = gatedDeltaUpdate(
-                q: qNormed[0..., ..<split, 0..., 0...],
-                k: kNormed[0..., ..<split, 0..., 0...],
-                v: v[0..., ..<split, 0..., 0...],
-                a: a[0..., ..<split, 0...],
-                b: b[0..., ..<split, 0...],
+        let splits = Array(1 ..< Swift.min(checkpointAfter ?? 0, S - 1) + 1)
+        var outs: [MLXArray] = []
+        var checkpoints: [(conv: MLXArray, recurrent: MLXArray)] = []
+        var newRecState = recState
+        for (start, end) in zip([0] + splits, splits + [S]) {
+            let (segmentOut, segmentState) = gatedDeltaUpdate(
+                q: qNormed[0..., start ..< end, 0..., 0...],
+                k: kNormed[0..., start ..< end, 0..., 0...],
+                v: v[0..., start ..< end, 0..., 0...],
+                a: a[0..., start ..< end, 0...],
+                b: b[0..., start ..< end, 0...],
                 aLog: aLog,
                 dtBias: dtBias,
-                state: recState,
-                mask: prefixMask,
+                state: newRecState,
+                mask: mask.map { $0[0..., start ..< end] },
                 useKernel: !training)
-            let (suffixOut, suffixState) = gatedDeltaUpdate(
-                q: qNormed[0..., split..., 0..., 0...],
-                k: kNormed[0..., split..., 0..., 0...],
-                v: v[0..., split..., 0..., 0...],
-                a: a[0..., split..., 0...],
-                b: b[0..., split..., 0...],
-                aLog: aLog,
-                dtBias: dtBias,
-                state: prefixState,
-                mask: suffixMask,
-                useKernel: !training)
-            out = concatenated([prefixOut, suffixOut], axis: 1)
-            newRecState = suffixState
-
+            outs.append(segmentOut)
+            newRecState = segmentState
+            guard end < S else { continue }
             let checkpointConv: MLXArray
             if convKernelSize > 1 {
                 let convInput = concatenated([convState, qkv], axis: 1)
-                checkpointConv = contiguous(
-                    convInput[
-                        0..., split ..< (split + convKernelSize - 1), 0...])
+                checkpointConv = contiguous(convInput[0..., end ..< (end + convKernelSize - 1), 0...])
             } else {
                 checkpointConv = MLXArray.zeros([B, 0, convDim], dtype: qkv.dtype)
             }
-            checkpoint = (checkpointConv, prefixState)
-        } else {
-            (out, newRecState) = gatedDeltaUpdate(
-                q: qNormed,
-                k: kNormed,
-                v: v,
-                a: a,
-                b: b,
-                aLog: aLog,
-                dtBias: dtBias,
-                state: recState,
-                mask: mask,
-                useKernel: !training)
-            checkpoint = nil
+            checkpoints.append((checkpointConv, segmentState))
         }
+        let out = outs.count == 1 ? outs[0] : concatenated(outs, axis: 1)
 
         let gated = norm(out, gate: z)
-        return (outProj(gated.reshaped(B, S, -1)), newConvState, newRecState, checkpoint)
+        return (outProj(gated.reshaped(B, S, -1)), newConvState, newRecState!, checkpoints)
     }
 
     /// The S == 1 depthwise conv as elementwise multiply-adds, so `compile`
@@ -1237,7 +1212,7 @@ extension Qwen35TextModel: LoRAModel {
 }
 
 extension Qwen35TextModel: SpeculativeCacheRewindModel {
-    public var maximumNativeTargetCacheRewind: Int { 1 }
+    public var maximumNativeTargetCacheRewind: Int { 7 }
 }
 
 // MARK: - Top-level Model
@@ -1301,7 +1276,7 @@ extension Qwen35Model: LoRAModel {
 }
 
 extension Qwen35Model: SpeculativeCacheRewindModel {
-    public var maximumNativeTargetCacheRewind: Int { 1 }
+    public var maximumNativeTargetCacheRewind: Int { 7 }
 }
 
 // MARK: - Chat conventions

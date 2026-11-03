@@ -491,7 +491,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let verifyTokens = concatenated([bonusToken, flatDraftTokens])
         let verifyInput = LMInput.Text(tokens: verifyTokens)
         let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
-        verifyState[mtpCacheCheckpointIndexKey] = nativeHybridRewind ? 1 : nil
+        verifyState[mtpCacheCheckpointIndexKey] = nativeHybridRewind ? numDraft : nil
         let verifyCache = nativeHybridRewind ? mainCache : round!.caches
         let mainResult = mainModel(
             verifyInput[text: .newAxis], cache: verifyCache, state: verifyState)

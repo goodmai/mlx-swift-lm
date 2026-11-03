@@ -67,7 +67,7 @@ final class Qwen35MTPPredictor: Module {
 
 public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
     public let configuration: Qwen35TextConfiguration
-    public let maximumBlockSize: Int? = 2
+    public let maximumBlockSize: Int? = 8
     public let requiresSharedTargetKV = false
     public let requiresPromptPrefill = true
     public let requiresGreedySampling = true
@@ -165,10 +165,32 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
         let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
 
         if let seed = state.seedToken {
+            let seedHidden = state.seedHidden
             state.seedToken = nil
             state.seedHidden = nil
             state.proposalAppended = 0
-            return seed
+            guard blockSize > 2, let seedHidden else { return seed }
+            let first = normalizedMTPColumn(seed)
+            state.proposalAppended = blockSize - 2
+            let rest = draftMTPTokenBlock(
+                targetEmbedTokens: targetEmbedTokens,
+                lmHead: lmHead,
+                inputEmbedding: inputEmbedding,
+                lastToken: first,
+                lastHidden: seedHidden,
+                queryOffset: state.nextPosition,
+                blockSize: blockSize - 1,
+                sampler: sampler,
+                cache: state.cache
+            ) { inputsEmbeds, hiddenStates, cache, positionOffset in
+                mtp(
+                    inputsEmbeds: inputsEmbeds,
+                    hiddenStates: hiddenStates,
+                    cache: cache,
+                    positionOffset: positionOffset)
+            }
+            state.nextPosition += state.proposalAppended
+            return concatenated([first, rest], axis: 1)
         }
 
         state.proposalAppended = blockSize - 1
