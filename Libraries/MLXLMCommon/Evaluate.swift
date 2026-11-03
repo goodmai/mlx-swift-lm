@@ -674,6 +674,21 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     mutating func discardGeneratedToken()
 }
 
+/// Serializes model evaluation across concurrent generations in one process.
+///
+/// A ``CompiledTrace`` swaps the weights it reads for tracer arrays while it
+/// traces a new input shape, so any other forward reading those weights at that
+/// moment evaluates an array with no primitive. The generation loops hold this
+/// lock around each step; a server that prefills or batches outside them takes
+/// it too. It is recursive so a caller holding it can run code that takes it.
+public enum ModelEvaluationLock {
+    public static let shared = NSRecursiveLock()
+}
+
+/// An iterator whose `next()` waits on model work that another thread runs under
+/// ``ModelEvaluationLock``; the generation loop calls it without the lock.
+public protocol SelfSerializingTokenIterator: TokenIteratorProtocol {}
+
 /// Internal lifecycle capability for iterators that retain generation work
 /// which must be reconciled after the token loop stops.
 protocol GenerationFinalizingTokenIterator: TokenIteratorProtocol {
@@ -1483,7 +1498,7 @@ private func runSynchronousGenerationLoop(
     var iterator = iterator
     var stopReason: GenerateStopReason?
 
-    while let token = autoreleasepool(invoking: { iterator.next() }) {
+    while let token = autoreleasepool(invoking: { ModelEvaluationLock.shared.withLock { iterator.next() } }) {
         // Compute the timing for the prompt.
         if promptTime == 0 {
             let now = Date.timeIntervalSinceReferenceDate
@@ -2370,8 +2385,13 @@ private func generateLoopTask<
             // (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted). The
             // post-loop block below assigns `.cancelled`; Stream.defaultStream.synchronize() still
             // settles any in-flight evaluation at the end of the task body.
+            let serializes = !(iterator is any SelfSerializingTokenIterator)
             tokenLoop: while !Task.isCancelled {
-                guard let token = autoreleasepool(invoking: { iterator.next() }) else { break }
+                guard
+                    let token = autoreleasepool(invoking: {
+                        serializes ? ModelEvaluationLock.shared.withLock { iterator.next() } : iterator.next()
+                    })
+                else { break }
                 tokenCollector.record(token)
 
                 if promptTime == 0 {
@@ -2436,7 +2456,7 @@ private func generateLoopTask<
             // but unreturned candidates in their shared caches. Remove that
             // lookahead before ChatSession reconciles its token ledger.
             if var finalizing = iterator as? any GenerationFinalizingTokenIterator {
-                finalizing.finalizeGeneration()
+                ModelEvaluationLock.shared.withLock { finalizing.finalizeGeneration() }
                 // Write back: the cast copies the iterator, and the trim also
                 // updates state held inline by the iterator (not just the
                 // reference-typed caches) that later reads still observe.
