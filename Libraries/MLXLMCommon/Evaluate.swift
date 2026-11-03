@@ -671,6 +671,8 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var promptPrefillTime: TimeInterval { get }
     var state: LMOutput.State? { get }
     var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { get }
+    /// The model whose ``ModelEvaluationLock`` serializes this iterator's steps.
+    var evaluatedModel: (any LanguageModel)? { get }
     mutating func discardGeneratedToken()
 }
 
@@ -678,11 +680,74 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
 ///
 /// A ``CompiledTrace`` swaps the weights it reads for tracer arrays while it
 /// traces a new input shape, so any other forward reading those weights at that
-/// moment evaluates an array with no primitive. The generation loops hold this
-/// lock around each step; a server that prefills or batches outside them takes
-/// it too. It is recursive so a caller holding it can run code that takes it.
+/// moment evaluates an array with no primitive. The generation loops hold the
+/// lock of the model they evaluate around each step; a server that prefills or
+/// batches outside them takes the same lock. Each lock is recursive so a caller
+/// holding it can run code that takes it, and first come, first served: a loop
+/// that releases and immediately retakes it queues behind threads already waiting
+/// instead of starving them. Separate models never wait on each other.
 public enum ModelEvaluationLock {
-    public static let shared = NSRecursiveLock()
+    public static let shared = FairRecursiveLock()
+
+    private final class Registry: @unchecked Sendable {
+        let guardLock = NSLock()
+        var locks: [ObjectIdentifier: FairRecursiveLock] = [:]
+    }
+    private static let registry = Registry()
+
+    /// The lock for `model`, or ``shared`` when the model is unknown.
+    public static func lock(for model: (any LanguageModel)?) -> FairRecursiveLock {
+        guard let model else { return shared }
+        let key = ObjectIdentifier(model as AnyObject)
+        return registry.guardLock.withLock {
+            if let lock = registry.locks[key] { return lock }
+            let lock = FairRecursiveLock()
+            registry.locks[key] = lock
+            return lock
+        }
+    }
+}
+
+/// A recursive lock that grants waiting threads in arrival order.
+public final class FairRecursiveLock: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var owner: pthread_t?
+    private var depth = 0
+    private var issued = 0
+    private var serving = 0
+
+    public init() {}
+
+    public func lock() {
+        condition.lock()
+        defer { condition.unlock() }
+        let me = pthread_self()
+        if let owner, pthread_equal(owner, me) != 0 {
+            depth += 1
+            return
+        }
+        let ticket = issued
+        issued += 1
+        while ticket != serving { condition.wait() }
+        owner = me
+        depth = 1
+    }
+
+    public func unlock() {
+        condition.lock()
+        defer { condition.unlock() }
+        depth -= 1
+        guard depth == 0 else { return }
+        owner = nil
+        serving += 1
+        condition.broadcast()
+    }
+
+    public func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
+    }
 }
 
 /// An iterator whose `next()` waits on model work that another thread runs under
@@ -698,6 +763,7 @@ protocol GenerationFinalizingTokenIterator: TokenIteratorProtocol {
 extension TokenIteratorProtocol {
     public var state: LMOutput.State? { nil }
     public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { nil }
+    public var evaluatedModel: (any LanguageModel)? { nil }
     public mutating func discardGeneratedToken() {}
 }
 
@@ -725,6 +791,7 @@ extension TokenIteratorProtocol {
 ///
 /// Note: this uses `asyncEval()` and there may be an async evaluation running after a call to `next()`.
 public struct TokenIterator: TokenIteratorProtocol {
+    public var evaluatedModel: (any LanguageModel)? { model }
     let model: any LanguageModel
 
     /// Per-call model state (e.g. M-RoPE rope deltas), seeded from the
@@ -1004,6 +1071,7 @@ public struct TokenIterator: TokenIteratorProtocol {
 ///
 /// Port of `speculative_generate_step()` from https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py
 public struct SpeculativeTokenIterator: TokenIteratorProtocol {
+    public var evaluatedModel: (any LanguageModel)? { mainModel }
 
     var y: LMInput.Text
     var draftY: LMInput.Text
@@ -1498,7 +1566,8 @@ private func runSynchronousGenerationLoop(
     var iterator = iterator
     var stopReason: GenerateStopReason?
 
-    while let token = autoreleasepool(invoking: { ModelEvaluationLock.shared.withLock { iterator.next() } }) {
+    let evaluation = ModelEvaluationLock.lock(for: iterator.evaluatedModel)
+    while let token = autoreleasepool(invoking: { evaluation.withLock { iterator.next() } }) {
         // Compute the timing for the prompt.
         if promptTime == 0 {
             let now = Date.timeIntervalSinceReferenceDate
@@ -2386,10 +2455,11 @@ private func generateLoopTask<
             // post-loop block below assigns `.cancelled`; Stream.defaultStream.synchronize() still
             // settles any in-flight evaluation at the end of the task body.
             let serializes = !(iterator is any SelfSerializingTokenIterator)
+            let evaluation = ModelEvaluationLock.lock(for: iterator.evaluatedModel)
             tokenLoop: while !Task.isCancelled {
                 guard
                     let token = autoreleasepool(invoking: {
-                        serializes ? ModelEvaluationLock.shared.withLock { iterator.next() } : iterator.next()
+                        serializes ? evaluation.withLock { iterator.next() } : iterator.next()
                     })
                 else { break }
                 tokenCollector.record(token)
@@ -2456,7 +2526,7 @@ private func generateLoopTask<
             // but unreturned candidates in their shared caches. Remove that
             // lookahead before ChatSession reconciles its token ledger.
             if var finalizing = iterator as? any GenerationFinalizingTokenIterator {
-                ModelEvaluationLock.shared.withLock { finalizing.finalizeGeneration() }
+                evaluation.withLock { finalizing.finalizeGeneration() }
                 // Write back: the cast copies the iterator, and the trim also
                 // updates state held inline by the iterator (not just the
                 // reference-typed caches) that later reads still observe.

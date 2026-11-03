@@ -34,6 +34,7 @@ import MLX
 /// per-stream drafter cache are passed as parameters to `draftBlock(...)` so
 /// drafter instances are safe to share across iterators).
 public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
+    public var evaluatedModel: (any LanguageModel)? { mainModel }
 
     var y: LMInput.Text
 
