@@ -109,8 +109,8 @@ package struct KVCachePlan: Sendable, Equatable {
 /// Access is externally serialized by generation/session ownership. This type
 /// is intentionally not `Sendable`: sharing it across isolation domains would
 /// permit unsynchronized mutation of both the cache and its progress state.
-package final class KVCacheStorage {
-    package var cache: [KVCache] {
+public final class KVCacheStorage {
+    public var cache: [KVCache] {
         didSet {
             precondition(
                 !roundIsOpen,
@@ -148,13 +148,13 @@ package final class KVCacheStorage {
     /// and the timeline are deliberately out of step until it commits. Operations that assume
     /// they are in step -- replacing entries, trimming, snapshotting -- are refused while one is
     /// open rather than silently reading a half-written position.
-    package var roundIsOpen: Bool { openRound != nil }
+    public var roundIsOpen: Bool { openRound != nil }
     /// Authoritative logical position represented by this model cache.
     ///
     /// Individual cache entries retain their native offsets and metadata, but
     /// the model-wide timeline lives here exactly once. Generation updates this
     /// value after successful model calls and rolls it back with cache trims.
-    package private(set) var processedTokenCount: Int
+    public private(set) var processedTokenCount: Int
 
     package init(
         _ cache: [KVCache],
@@ -167,13 +167,17 @@ package final class KVCacheStorage {
             processedTokenCount ?? Self.inferProcessedTokenCount(from: cache)
     }
 
+    public convenience init(_ cache: [KVCache]) {
+        self.init(cache, plan: .disabled)
+    }
+
     package func replace(with cache: [KVCache]) {
         self.cache = cache
     }
 
     /// Commit tokens after a successful model evaluation.
     @inline(__always)
-    package func commitProcessedTokens(_ count: Int) {
+    public func commitProcessedTokens(_ count: Int) {
         precondition(count >= 0, "Processed token count cannot move backwards")
         let (updated, overflow) = processedTokenCount.addingReportingOverflow(count)
         precondition(!overflow, "Processed token count overflow")
@@ -216,7 +220,7 @@ package final class KVCacheStorage {
     ///
     /// - Parameter maximumPositions: the widest write the round will make. Append-only leaves are
     ///   admitted only if they can still be rewound after absorbing it.
-    package func beginRound(maximumPositions: Int) -> KVCacheRound? {
+    public func beginRound(maximumPositions: Int) -> KVCacheRound? {
         precondition(!roundIsOpen, "a staged round is already open on this storage")
 
         let leaves = KVCacheTree.leaves(in: cache)
@@ -247,7 +251,7 @@ package final class KVCacheStorage {
     /// K/V without moving the timeline -- or the reverse -- would recreate, one level up, the
     /// split brain this storage exists to prevent.
     @discardableResult
-    package func commit(_ round: KVCacheRound, retaining: Int) -> KVCacheRoundCommit {
+    public func commit(_ round: KVCacheRound, retaining: Int) -> KVCacheRoundCommit {
         precondition(openRound === round, "committing a round that is not open on this storage")
         let written = round.writtenPositions
         precondition(
@@ -287,7 +291,7 @@ package final class KVCacheStorage {
 
     /// Drop everything the round wrote.
     @discardableResult
-    package func rollback(_ round: KVCacheRound) -> KVCacheRoundCommit {
+    public func rollback(_ round: KVCacheRound) -> KVCacheRoundCommit {
         commit(round, retaining: 0)
     }
 
@@ -302,7 +306,7 @@ package final class KVCacheStorage {
     /// Only the most recent commit can be taken back: any write after it invalidates the record,
     /// and so does replacing an entry, since the record names slots rather than objects.
     @discardableResult
-    package func rewindLastRound(_ count: Int) -> Int {
+    public func rewindLastRound(_ count: Int) -> Int {
         precondition(count >= 0, "Rewind count cannot be negative")
         precondition(!roundIsOpen, "cannot rewind while a staged round is open")
         guard count > 0 else { return 0 }
