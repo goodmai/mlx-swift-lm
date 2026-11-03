@@ -119,18 +119,24 @@ public struct MTPDrafterState {
     /// Number of tentative cache entries appended by the current proposal.
     public var proposalAppended: Int
 
+    /// Target hidden row of position `nextPosition`, kept when a prompt prefix was prefilled
+    /// without the token that follows it; the next prefill pairs it with its first token.
+    public var carryHidden: MLXArray?
+
     public init(
         cache: [KVCache],
         nextPosition: Int = 0,
         seedToken: MLXArray? = nil,
         seedHidden: MLXArray? = nil,
-        proposalAppended: Int = 0
+        proposalAppended: Int = 0,
+        carryHidden: MLXArray? = nil
     ) {
         self.cache = cache
         self.nextPosition = nextPosition
         self.seedToken = seedToken
         self.seedHidden = seedHidden
         self.proposalAppended = proposalAppended
+        self.carryHidden = carryHidden
     }
 }
 
@@ -145,12 +151,14 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
     /// Create per-stream state owned and trimmed by the iterator.
     func makeState(parameters: GenerateParameters?) -> MTPDrafterState
 
-    /// Prefill drafter-owned state from the target's prompt hidden states.
+    /// Prefill drafter-owned state from the target's prompt hidden states. With
+    /// `firstBonus == nil` the last prompt position is left in `carryHidden` for a later
+    /// prefill that continues from it.
     func prepareDrafterState(
         target: any LanguageModel,
         promptTokens: MLXArray,
         targetHidden: MLXArray,
-        firstBonus: MLXArray,
+        firstBonus: MLXArray?,
         positionDeltas: MLXArray?,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
@@ -188,7 +196,7 @@ extension StatefulMTPDrafterModel {
         target _: any LanguageModel,
         promptTokens _: MLXArray,
         targetHidden _: MLXArray,
-        firstBonus _: MLXArray,
+        firstBonus _: MLXArray?,
         positionDeltas _: MLXArray?,
         state _: inout MTPDrafterState,
         sampler _: any LogitSampler

@@ -112,7 +112,7 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         target: any LanguageModel,
         promptTokens: MLXArray,
         targetHidden: MLXArray,
-        firstBonus: MLXArray,
+        firstBonus: MLXArray?,
         positionDeltas _: MLXArray?,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
@@ -123,16 +123,21 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         let targetEmbedTokens = target.languageModel.model.embedTokens
         let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
         let prompt = normalizedMTPTokenBatch(promptTokens)
-        let bonus = normalizedMTPColumn(firstBonus)
         guard prompt.dim(-1) > 0 else { return }
 
-        let shifted = concatenated([prompt[0..., 1...], bonus], axis: 1)
-        let hidden = targetHidden[0..., ..<shifted.dim(1), 0...]
-        state.nextPosition = 0
+        let rows = targetHidden[0..., ..<prompt.dim(-1), 0...]
+        let hiddenRows = state.carryHidden.map { concatenated([$0, rows], axis: 1) } ?? rows
+        let nextTokens = state.carryHidden == nil ? prompt[0..., 1...] : prompt
+        let shifted = firstBonus.map { concatenated([nextTokens, normalizedMTPColumn($0)], axis: 1) } ?? nextTokens
+        state.carryHidden = firstBonus == nil ? hiddenRows[0..., (-1)..., 0...] : nil
+        guard shifted.dim(1) > 0 else { return }
+        let hidden = hiddenRows[0..., ..<shifted.dim(1), 0...]
+        let offset = state.nextPosition
         let mtpHidden = mtp(
             inputsEmbeds: inputEmbedding(shifted), hiddenStates: hidden,
-            cache: state.cache, positionOffset: 0, positionDeltas: nil)
-        state.nextPosition = shifted.dim(1)
+            cache: state.cache, positionOffset: offset, positionDeltas: nil)
+        state.nextPosition = offset + shifted.dim(1)
+        guard firstBonus != nil else { return }
         state.seedHidden = mtpHidden[0..., (-1)..., 0...]
         state.seedToken = sampleMTPSeed(
             hidden: state.seedHidden!, targetEmbedTokens: targetEmbedTokens,

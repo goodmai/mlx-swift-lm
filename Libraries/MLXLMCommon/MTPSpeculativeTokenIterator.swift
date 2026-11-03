@@ -110,6 +110,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         mainModel: any LanguageModel,
         drafter: any MTPDrafterModel,
         mainCache: [KVCache]? = nil,
+        drafterState: MTPDrafterState? = nil,
         parameters: GenerateParameters,
         blockSize: Int,
         components: GenerationComponents = .init()
@@ -126,7 +127,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         self.drafter = drafter
 
         self.mainCacheStorage = KVCacheStorage(mainCache, plan: kvCachePlan)
-        self.drafterState = (drafter as? any StatefulMTPDrafterModel)?
+        self.drafterState = drafterState ?? (drafter as? any StatefulMTPDrafterModel)?
             .makeState(parameters: parameters)
 
         self.sampler = parameters.sampler()
