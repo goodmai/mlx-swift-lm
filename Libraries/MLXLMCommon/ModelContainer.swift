@@ -127,6 +127,16 @@ public final class ModelContainer: Sendable {
         }.consume()
     }
 
+    /// ``performSending(nonSendable:_:)`` with the model's evaluation lock held around `action`,
+    /// see ``LanguageModel/evaluating(_:)``.
+    nonisolated(nonsending) public func performEvaluating<V, R>(
+        nonSendable values: consuming V, _ action: @Sendable (ModelContext, V) throws -> R
+    ) async rethrows -> sending R {
+        try await performSending(nonSendable: values) { context, values in
+            try context.model.evaluating { try action(context, values) }
+        }
+    }
+
     /// Update the owned `ModelContext`.
     /// - Parameter action: update action
     public func update(_ action: @Sendable (inout ModelContext) -> Void) async {

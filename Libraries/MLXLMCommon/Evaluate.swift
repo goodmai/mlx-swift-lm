@@ -671,23 +671,32 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var promptPrefillTime: TimeInterval { get }
     var state: LMOutput.State? { get }
     var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { get }
-    /// The model whose ``ModelEvaluationLock`` serializes this iterator's steps.
+    /// The model whose ``LanguageModel/evaluating(_:)`` serializes this iterator's steps.
     var evaluatedModel: (any LanguageModel)? { get }
     mutating func discardGeneratedToken()
 }
 
+extension LanguageModel {
+    /// Runs `body` while holding this model's evaluation lock.
+    ///
+    /// A ``CompiledTrace`` swaps the weights it reads for tracer arrays while it
+    /// traces a new input shape, so any other forward reading those weights at that
+    /// moment evaluates an array with no primitive. The generation loops hold this
+    /// lock around each step; code that prefills or batches outside them runs its
+    /// forwards in `body`. The lock is recursive and first come, first served.
+    /// Separate models never wait on each other.
+    public func evaluating<R>(_ body: () throws -> R) rethrows -> R {
+        try ModelEvaluationLock.lock(for: self).withLock(body)
+    }
+}
+
 /// Serializes model evaluation across concurrent generations in one process.
 ///
-/// A ``CompiledTrace`` swaps the weights it reads for tracer arrays while it
-/// traces a new input shape, so any other forward reading those weights at that
-/// moment evaluates an array with no primitive. The generation loops hold the
-/// lock of the model they evaluate around each step; a server that prefills or
-/// batches outside them takes the same lock. Each lock is recursive so a caller
-/// holding it can run code that takes it, and first come, first served: a loop
-/// that releases and immediately retakes it queues behind threads already waiting
-/// instead of starving them. Separate models never wait on each other.
-public enum ModelEvaluationLock {
-    public static let shared = FairRecursiveLock()
+/// Each lock is recursive so a caller holding it can run code that takes it, and
+/// first come, first served: a loop that releases and immediately retakes it queues
+/// behind threads already waiting instead of starving them.
+enum ModelEvaluationLock {
+    static let shared = FairRecursiveLock()
 
     private final class Registry: @unchecked Sendable {
         let guardLock = NSLock()
@@ -696,7 +705,7 @@ public enum ModelEvaluationLock {
     private static let registry = Registry()
 
     /// The lock for `model`, or ``shared`` when the model is unknown.
-    public static func lock(for model: (any LanguageModel)?) -> FairRecursiveLock {
+    static func lock(for model: (any LanguageModel)?) -> FairRecursiveLock {
         guard let model else { return shared }
         let key = ObjectIdentifier(model as AnyObject)
         return registry.guardLock.withLock {
@@ -709,16 +718,14 @@ public enum ModelEvaluationLock {
 }
 
 /// A recursive lock that grants waiting threads in arrival order.
-public final class FairRecursiveLock: @unchecked Sendable {
+final class FairRecursiveLock: @unchecked Sendable {
     private let condition = NSCondition()
     private var owner: pthread_t?
     private var depth = 0
     private var issued = 0
     private var serving = 0
 
-    public init() {}
-
-    public func lock() {
+    func lock() {
         condition.lock()
         defer { condition.unlock() }
         let me = pthread_self()
@@ -733,7 +740,7 @@ public final class FairRecursiveLock: @unchecked Sendable {
         depth = 1
     }
 
-    public func unlock() {
+    func unlock() {
         condition.lock()
         defer { condition.unlock() }
         depth -= 1
@@ -743,7 +750,7 @@ public final class FairRecursiveLock: @unchecked Sendable {
         condition.broadcast()
     }
 
-    public func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }
         return try body()
@@ -751,7 +758,7 @@ public final class FairRecursiveLock: @unchecked Sendable {
 }
 
 /// An iterator whose `next()` waits on model work that another thread runs under
-/// ``ModelEvaluationLock``; the generation loop calls it without the lock.
+/// ``LanguageModel/evaluating(_:)``; the generation loop calls it without the lock.
 public protocol SelfSerializingTokenIterator: TokenIteratorProtocol {}
 
 /// Internal lifecycle capability for iterators that retain generation work
