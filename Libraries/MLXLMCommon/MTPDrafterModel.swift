@@ -55,33 +55,99 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     ///     Used to look up target-derived constants (input embeddings, embed
     ///     scale, etc.) inline per round; conformers must not retain or
     ///     mutate references derived from `target`.
-    ///   - lastToken: Bonus token from the target's last verify pass, shape `[B]`.
-    ///   - lastHidden: Target's last hidden state, shape `[B, 1, backbone_hidden_size]`.
-    ///   - sharedKV: Dict keyed by `layer_type` (`"full_attention"` /
-    ///     `"sliding_attention"`) mapping to `(keys, values)` `MLXArray`s for
-    ///     the last layer of that layer-type in the target.
-    ///   - positionDeltas: Optional target-emitted position delta state for
-    ///     multimodal RoPE models whose continuation positions are not
-    ///     derivable from cache length alone.
-    ///   - queryOffset: Constant absolute position for the round (the
-    ///     position the bonus token sits at in the target's KV cache).
-    ///     Passed as a Swift `Int` rather than an `MLXArray` to avoid the
-    ///     `.item()` round-trip that would otherwise stall the GPU per
-    ///     speculation round.
-    ///   - blockSize: Total tokens in the round (the drafter returns
-    ///     `blockSize - 1`; the bonus token is implicit).
+    ///   - input: The round's inputs, see ``MTPDraftInput``.
     ///   - sampler: `LogitSampler` to apply to each step's logits.
     /// - Returns: `[B, blockSize - 1]` token array.
     func draftBlock(
         target: any LanguageModel,
+        input: MTPDraftInput,
+        sampler: any LogitSampler
+    ) -> MLXArray
+}
+
+public struct MTPDraftInput {
+    /// Bonus token from the target's last verify pass, shape `[B]`.
+    public var lastToken: MLXArray
+
+    /// Target's last hidden state, shape `[B, 1, backbone_hidden_size]`.
+    public var lastHidden: MLXArray
+
+    /// Dict keyed by `layer_type` (`"full_attention"` /
+    /// `"sliding_attention"`) mapping to `(keys, values)` `MLXArray`s for
+    /// the last layer of that layer-type in the target.
+    public var sharedKV: [String: (MLXArray, MLXArray)]
+
+    /// Optional target-emitted position delta state for multimodal RoPE
+    /// models whose continuation positions are not derivable from cache
+    /// length alone.
+    public var positionDeltas: MLXArray?
+
+    /// Constant absolute position for the round (the position the bonus
+    /// token sits at in the target's KV cache). A Swift `Int` rather than an
+    /// `MLXArray` to avoid the `.item()` round-trip that would otherwise
+    /// stall the GPU per speculation round.
+    public var queryOffset: Int
+
+    /// Total tokens in the round (the drafter returns `blockSize - 1`; the
+    /// bonus token is implicit).
+    public var blockSize: Int
+
+    public init(
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas: MLXArray?,
+        positionDeltas: MLXArray? = nil,
         queryOffset: Int,
-        blockSize: Int,
-        sampler: any LogitSampler
-    ) -> MLXArray
+        blockSize: Int
+    ) {
+        self.lastToken = lastToken
+        self.lastHidden = lastHidden
+        self.sharedKV = sharedKV
+        self.positionDeltas = positionDeltas
+        self.queryOffset = queryOffset
+        self.blockSize = blockSize
+    }
+}
+
+public struct MTPPrefillInput {
+    public var promptTokens: MLXArray
+    public var targetHidden: MLXArray
+    public var firstBonus: MLXArray?
+    public var positionDeltas: MLXArray?
+
+    public init(
+        promptTokens: MLXArray,
+        targetHidden: MLXArray,
+        firstBonus: MLXArray?,
+        positionDeltas: MLXArray? = nil
+    ) {
+        self.promptTokens = promptTokens
+        self.targetHidden = targetHidden
+        self.firstBonus = firstBonus
+        self.positionDeltas = positionDeltas
+    }
+}
+
+public struct MTPCommitInput {
+    public var targetHidden: MLXArray
+    public var draftTokens: MLXArray
+    public var acceptedCount: Int
+    public var finalToken: MLXArray
+    public var positionDeltas: MLXArray?
+
+    public init(
+        targetHidden: MLXArray,
+        draftTokens: MLXArray,
+        acceptedCount: Int,
+        finalToken: MLXArray,
+        positionDeltas: MLXArray? = nil
+    ) {
+        self.targetHidden = targetHidden
+        self.draftTokens = draftTokens
+        self.acceptedCount = acceptedCount
+        self.finalToken = finalToken
+        self.positionDeltas = positionDeltas
+    }
 }
 
 extension MTPDrafterModel {
@@ -156,23 +222,15 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
     /// prefill that continues from it.
     func prepareDrafterState(
         target: any LanguageModel,
-        promptTokens: MLXArray,
-        targetHidden: MLXArray,
-        firstBonus: MLXArray?,
-        positionDeltas: MLXArray?,
+        input: MTPPrefillInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     )
 
-    /// Stateful variant of ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)``.
+    /// Stateful variant of ``MTPDrafterModel/draftBlock(target:input:sampler:)``.
     func draftBlock(
         target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
+        input: MTPDraftInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> MLXArray
@@ -181,11 +239,7 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
     /// target, then seed the next proposal if the architecture supports it.
     func commitDrafterState(
         target: any LanguageModel,
-        targetHidden: MLXArray,
-        draftTokens: MLXArray,
-        acceptedCount: Int,
-        finalToken: MLXArray,
-        positionDeltas: MLXArray?,
+        input: MTPCommitInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     )
@@ -194,25 +248,18 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
 extension StatefulMTPDrafterModel {
     public func prepareDrafterState(
         target _: any LanguageModel,
-        promptTokens _: MLXArray,
-        targetHidden _: MLXArray,
-        firstBonus _: MLXArray?,
-        positionDeltas _: MLXArray?,
+        input _: MTPPrefillInput,
         state _: inout MTPDrafterState,
         sampler _: any LogitSampler
     ) {}
 
     public func commitDrafterState(
         target _: any LanguageModel,
-        targetHidden _: MLXArray,
-        draftTokens: MLXArray,
-        acceptedCount: Int,
-        finalToken _: MLXArray,
-        positionDeltas _: MLXArray?,
+        input: MTPCommitInput,
         state: inout MTPDrafterState,
         sampler _: any LogitSampler
     ) {
-        let rejected = draftTokens.dim(-1) - acceptedCount
+        let rejected = input.draftTokens.dim(-1) - input.acceptedCount
         if rejected > 0 {
             trimPromptCache(state.cache, numTokens: rejected)
         }

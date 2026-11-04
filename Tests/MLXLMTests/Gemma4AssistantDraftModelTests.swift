@@ -411,12 +411,12 @@ func testDraftBlockAcceptsGemma4UnifiedTarget() throws {
     let lastHiddenSlice = lastHidden[0..., (-1)..., 0...]
     let proposed = drafter.draftBlock(
         target: target,
-        lastToken: MLXArray([Int32(3)]),
-        lastHidden: lastHiddenSlice,
-        sharedKV: sharedKV,
-        positionDeltas: nil,
-        queryOffset: cache.first?.offset ?? 8,
-        blockSize: 3,
+        input: MTPDraftInput(
+            lastToken: MLXArray([Int32(3)]),
+            lastHidden: lastHiddenSlice,
+            sharedKV: sharedKV,
+            queryOffset: cache.first?.offset ?? 8,
+            blockSize: 3),
         sampler: ArgMaxSampler()
     )
     eval(proposed)

@@ -8,7 +8,7 @@ import MLX
 ///
 /// Parallels ``SpeculativeTokenIterator`` but for Gemma 4 - style drafters
 /// that share K/V with the target model and produce K - 1 candidate tokens
-/// per round in a single ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)`` call (rather
+/// per round in a single ``MTPDrafterModel/draftBlock(target:input:sampler:)`` call (rather
 /// than K sequential single-token calls). Every per-round input —
 /// `lastToken`, `lastHidden`, `sharedKV`, `positionIds` — is threaded as a
 /// method argument, with the target's last hidden state and per-`layer_type`
@@ -347,10 +347,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             }
             statefulDrafter.prepareDrafterState(
                 target: mainModel,
-                promptTokens: input.text.tokens,
-                targetHidden: targetHidden,
-                firstBonus: y.tokens,
-                positionDeltas: mainState?[mtpPositionDeltasKey],
+                input: MTPPrefillInput(
+                    promptTokens: input.text.tokens,
+                    targetHidden: targetHidden,
+                    firstBonus: y.tokens,
+                    positionDeltas: mainState?[mtpPositionDeltasKey]),
                 state: &currentDrafterState,
                 sampler: sampler)
             drafterState = currentDrafterState
@@ -457,33 +458,28 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         )
 
         let bonusToken = y.tokens
+        let draftInput = MTPDraftInput(
+            lastToken: bonusToken,
+            lastHidden: bonusSlotHidden,
+            sharedKV: sharedKV,
+            positionDeltas: state[mtpPositionDeltasKey],
+            queryOffset: queryOffset,
+            blockSize: numDraft + 1  // total round size: bonus + numDraft
+        )
         let draftTokens: MLXArray
         if let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
             var currentDrafterState = drafterState
         {
             draftTokens = statefulDrafter.draftBlock(
                 target: mainModel,
-                lastToken: bonusToken,
-                lastHidden: bonusSlotHidden,
-                sharedKV: sharedKV,
-                positionDeltas: state[mtpPositionDeltasKey],
-                queryOffset: queryOffset,
-                blockSize: numDraft + 1,  // total round size: bonus + numDraft
+                input: draftInput,
                 state: &currentDrafterState,
                 sampler: sampler
             )
             drafterState = currentDrafterState
         } else {
             draftTokens = drafter.draftBlock(
-                target: mainModel,
-                lastToken: bonusToken,
-                lastHidden: bonusSlotHidden,
-                sharedKV: sharedKV,
-                positionDeltas: state[mtpPositionDeltasKey],
-                queryOffset: queryOffset,
-                blockSize: numDraft + 1,  // total round size: bonus + numDraft
-                sampler: sampler
-            )
+                target: mainModel, input: draftInput, sampler: sampler)
         }
         // draftTokens shape [B, numDraft] -> flatten to [numDraft].
         let flatDraftTokens = draftTokens.flattened()
@@ -558,11 +554,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         {
             statefulDrafter.commitDrafterState(
                 target: mainModel,
-                targetHidden: mainResult.state?[mtpLastHiddenStatesKey] ?? lastHidden,
-                draftTokens: draftTokens,
-                acceptedCount: accepted,
-                finalToken: emittedFinalToken,
-                positionDeltas: mainResult.state?[mtpPositionDeltasKey],
+                input: MTPCommitInput(
+                    targetHidden: mainResult.state?[mtpLastHiddenStatesKey] ?? lastHidden,
+                    draftTokens: draftTokens,
+                    acceptedCount: accepted,
+                    finalToken: emittedFinalToken,
+                    positionDeltas: mainResult.state?[mtpPositionDeltasKey]),
                 state: &currentDrafterState,
                 sampler: sampler)
             drafterState = currentDrafterState

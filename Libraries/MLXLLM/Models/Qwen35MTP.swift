@@ -98,19 +98,17 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
 
     public func prepareDrafterState(
         target: any LanguageModel,
-        promptTokens: MLXArray,
-        targetHidden: MLXArray,
-        firstBonus: MLXArray?,
-        positionDeltas _: MLXArray?,
+        input: MTPPrefillInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) {
         let (targetEmbedTokens, lmHead) = targetEmbeddingAndHead(target)
         let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
-        let prompt = normalizedMTPTokenBatch(promptTokens)
+        let prompt = normalizedMTPTokenBatch(input.promptTokens)
         guard prompt.dim(-1) > 0 else { return }
 
-        let rows = targetHidden[0..., ..<prompt.dim(-1), 0...]
+        let firstBonus = input.firstBonus
+        let rows = input.targetHidden[0..., ..<prompt.dim(-1), 0...]
         let hiddenRows = state.carryHidden.map { concatenated([$0, rows], axis: 1) } ?? rows
         let nextTokens = state.carryHidden == nil ? prompt[0..., 1...] : prompt
         let shifted = firstBonus.map { concatenated([nextTokens, normalizedMTPColumn($0)], axis: 1) } ?? nextTokens
@@ -134,38 +132,20 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
 
     public func draftBlock(
         target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
+        input: MTPDraftInput,
         sampler: any LogitSampler
     ) -> MLXArray {
         var state = makeState(parameters: nil)
-        return draftBlock(
-            target: target,
-            lastToken: lastToken,
-            lastHidden: lastHidden,
-            sharedKV: sharedKV,
-            positionDeltas: positionDeltas,
-            queryOffset: queryOffset,
-            blockSize: blockSize,
-            state: &state,
-            sampler: sampler)
+        return draftBlock(target: target, input: input, state: &state, sampler: sampler)
     }
 
     public func draftBlock(
         target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV _: [String: (MLXArray, MLXArray)],
-        positionDeltas _: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
+        input: MTPDraftInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> MLXArray {
+        let blockSize = input.blockSize
         let (targetEmbedTokens, lmHead) = targetEmbeddingAndHead(target)
         let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
 
@@ -203,9 +183,9 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
             targetEmbedTokens: targetEmbedTokens,
             lmHead: lmHead,
             inputEmbedding: inputEmbedding,
-            lastToken: lastToken,
-            lastHidden: lastHidden,
-            queryOffset: queryOffset,
+            lastToken: input.lastToken,
+            lastHidden: input.lastHidden,
+            queryOffset: input.queryOffset,
             blockSize: blockSize,
             sampler: sampler,
             cache: state.cache
@@ -222,14 +202,11 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
 
     public func commitDrafterState(
         target: any LanguageModel,
-        targetHidden: MLXArray,
-        draftTokens: MLXArray,
-        acceptedCount: Int,
-        finalToken: MLXArray,
-        positionDeltas _: MLXArray?,
+        input: MTPCommitInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) {
+        let acceptedCount = input.acceptedCount
         let keepAppended = Swift.min(acceptedCount, state.proposalAppended)
         let trim = state.proposalAppended - keepAppended
         if trim > 0 {
@@ -240,11 +217,11 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
         var tokens = [MLXArray]()
         var hiddens = [MLXArray]()
         for index in keepAppended ..< acceptedCount {
-            tokens.append(draftTokens[0..., index ..< (index + 1)])
-            hiddens.append(targetHidden[0..., index ..< (index + 1), 0...])
+            tokens.append(input.draftTokens[0..., index ..< (index + 1)])
+            hiddens.append(input.targetHidden[0..., index ..< (index + 1), 0...])
         }
-        tokens.append(normalizedMTPColumn(finalToken))
-        hiddens.append(targetHidden[0..., acceptedCount ..< (acceptedCount + 1), 0...])
+        tokens.append(normalizedMTPColumn(input.finalToken))
+        hiddens.append(input.targetHidden[0..., acceptedCount ..< (acceptedCount + 1), 0...])
 
         let (targetEmbedTokens, lmHead) = targetEmbeddingAndHead(target)
         let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens

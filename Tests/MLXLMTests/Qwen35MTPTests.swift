@@ -266,8 +266,10 @@ struct Qwen35MTPMetalTests {
             var state = drafter.makeState(parameters: nil)
             var bonus = MLXArray([Int32(4)])
             drafter.prepareDrafterState(
-                target: target, promptTokens: prompt, targetHidden: promptHidden,
-                firstBonus: bonus, positionDeltas: nil, state: &state, sampler: sampler)
+                target: target,
+                input: MTPPrefillInput(
+                    promptTokens: prompt, targetHidden: promptHidden, firstBonus: bonus),
+                state: &state, sampler: sampler)
             eval(state.seedToken!, state.seedHidden!)
             #expect(state.cache.allSatisfy { $0.offset == 3 })
             #expect(state.nextPosition == 3)
@@ -275,9 +277,10 @@ struct Qwen35MTPMetalTests {
             var expectedPosition = 3
             for accepted in pattern {
                 let proposal = drafter.draftBlock(
-                    target: target, lastToken: bonus,
-                    lastHidden: promptHidden[0..., (-1)..., 0...], sharedKV: [:],
-                    positionDeltas: nil, queryOffset: expectedPosition, blockSize: 2,
+                    target: target,
+                    input: MTPDraftInput(
+                        lastToken: bonus, lastHidden: promptHidden[0..., (-1)..., 0...],
+                        sharedKV: [:], queryOffset: expectedPosition, blockSize: 2),
                     state: &state, sampler: sampler)
                 eval(proposal)
                 #expect(state.cache.allSatisfy { $0.offset == expectedPosition })
@@ -285,8 +288,10 @@ struct Qwen35MTPMetalTests {
                 let verifyHidden = MLXArray.zeros([1, 2, cfg.hiddenSize])
                 let finalToken = MLXArray([Int32(8 + accepted)])
                 drafter.commitDrafterState(
-                    target: target, targetHidden: verifyHidden, draftTokens: proposal,
-                    acceptedCount: accepted, finalToken: finalToken, positionDeltas: nil,
+                    target: target,
+                    input: MTPCommitInput(
+                        targetHidden: verifyHidden, draftTokens: proposal,
+                        acceptedCount: accepted, finalToken: finalToken),
                     state: &state, sampler: sampler)
                 eval(state.seedToken!, state.seedHidden!)
                 expectedPosition += accepted + 1

@@ -2159,7 +2159,7 @@ public func generateTokens(
 ///     quantization, etc.).
 ///   - context: model context for the main (verifier) model.
 ///   - mtpDrafter: the ``MTPDrafterModel``. The target is threaded through
-///     ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)``
+///     ``MTPDrafterModel/draftBlock(target:input:sampler:)``
 ///     per round; drafter instances hold no target-derived state and are safe
 ///     to share across iterators. Speculative rounds are staged and committed
 ///     rather than written and rewound, so a sliding-window model speculates

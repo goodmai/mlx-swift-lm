@@ -203,14 +203,11 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
 
     public func draftBlock(
         target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas _: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
+        input: MTPDraftInput,
         sampler: any LogitSampler
     ) -> MLXArray {
+        let (lastToken, lastHidden, sharedKV) = (input.lastToken, input.lastHidden, input.sharedKV)
+        let (queryOffset, blockSize) = (input.queryOffset, input.blockSize)
         precondition(blockSize >= 2, "blockSize must be >= 2 (K-1 drafted + 1 bonus)")
 
         // Derive target-bound constants inline per round. Mirrors mlx-vlm's

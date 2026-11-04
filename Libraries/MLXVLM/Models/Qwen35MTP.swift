@@ -110,10 +110,7 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
 
     public func prepareDrafterState(
         target: any LanguageModel,
-        promptTokens: MLXArray,
-        targetHidden: MLXArray,
-        firstBonus: MLXArray?,
-        positionDeltas _: MLXArray?,
+        input: MTPPrefillInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) {
@@ -122,10 +119,11 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         }
         let targetEmbedTokens = target.languageModel.model.embedTokens
         let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
-        let prompt = normalizedMTPTokenBatch(promptTokens)
+        let prompt = normalizedMTPTokenBatch(input.promptTokens)
         guard prompt.dim(-1) > 0 else { return }
 
-        let rows = targetHidden[0..., ..<prompt.dim(-1), 0...]
+        let firstBonus = input.firstBonus
+        let rows = input.targetHidden[0..., ..<prompt.dim(-1), 0...]
         let hiddenRows = state.carryHidden.map { concatenated([$0, rows], axis: 1) } ?? rows
         let nextTokens = state.carryHidden == nil ? prompt[0..., 1...] : prompt
         let shifted = firstBonus.map { concatenated([nextTokens, normalizedMTPColumn($0)], axis: 1) } ?? nextTokens
@@ -147,35 +145,16 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
 
     public func draftBlock(
         target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
+        input: MTPDraftInput,
         sampler: any LogitSampler
     ) -> MLXArray {
         var state = makeState(parameters: nil)
-        return draftBlock(
-            target: target,
-            lastToken: lastToken,
-            lastHidden: lastHidden,
-            sharedKV: sharedKV,
-            positionDeltas: positionDeltas,
-            queryOffset: queryOffset,
-            blockSize: blockSize,
-            state: &state,
-            sampler: sampler)
+        return draftBlock(target: target, input: input, state: &state, sampler: sampler)
     }
 
     public func draftBlock(
         target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV _: [String: (MLXArray, MLXArray)],
-        positionDeltas: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
+        input: MTPDraftInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> MLXArray {
@@ -195,15 +174,15 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
             return seed
         }
 
-        state.proposalAppended = blockSize - 1
+        state.proposalAppended = input.blockSize - 1
         let proposed = draftMTPTokenBlock(
             targetEmbedTokens: targetEmbedTokens,
             lmHead: lmHead,
             inputEmbedding: inputEmbedding,
-            lastToken: lastToken,
-            lastHidden: lastHidden,
-            queryOffset: queryOffset,
-            blockSize: blockSize,
+            lastToken: input.lastToken,
+            lastHidden: input.lastHidden,
+            queryOffset: input.queryOffset,
+            blockSize: input.blockSize,
             sampler: sampler,
             cache: state.cache
         ) { inputsEmbeds, hiddenStates, cache, positionOffset in
@@ -212,7 +191,7 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
                 hiddenStates: hiddenStates,
                 cache: cache,
                 positionOffset: positionOffset,
-                positionDeltas: positionDeltas)
+                positionDeltas: input.positionDeltas)
         }
         state.nextPosition += state.proposalAppended
         return proposed
@@ -220,17 +199,14 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
 
     public func commitDrafterState(
         target: any LanguageModel,
-        targetHidden: MLXArray,
-        draftTokens: MLXArray,
-        acceptedCount: Int,
-        finalToken: MLXArray,
-        positionDeltas: MLXArray?,
+        input: MTPCommitInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) {
         guard let target = target as? Qwen35 else {
             fatalError("Qwen35VLMNextNDraftModel requires a Qwen35 VLM target")
         }
+        let acceptedCount = input.acceptedCount
         let keepAppended = Swift.min(acceptedCount, state.proposalAppended)
         let trim = state.proposalAppended - keepAppended
         if trim > 0 {
@@ -241,11 +217,11 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         var tokens = [MLXArray]()
         var hiddens = [MLXArray]()
         for index in keepAppended ..< acceptedCount {
-            tokens.append(draftTokens[0..., index ..< (index + 1)])
-            hiddens.append(targetHidden[0..., index ..< (index + 1), 0...])
+            tokens.append(input.draftTokens[0..., index ..< (index + 1)])
+            hiddens.append(input.targetHidden[0..., index ..< (index + 1), 0...])
         }
-        tokens.append(normalizedMTPColumn(finalToken))
-        hiddens.append(targetHidden[0..., acceptedCount ..< (acceptedCount + 1), 0...])
+        tokens.append(normalizedMTPColumn(input.finalToken))
+        hiddens.append(input.targetHidden[0..., acceptedCount ..< (acceptedCount + 1), 0...])
 
         let targetEmbedTokens = target.languageModel.model.embedTokens
         let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
@@ -254,7 +230,7 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         let mtpHidden = mtp(
             inputsEmbeds: inputEmbedding(committedTokens), hiddenStates: committedHidden,
             cache: state.cache, positionOffset: state.nextPosition,
-            positionDeltas: positionDeltas)
+            positionDeltas: input.positionDeltas)
         state.nextPosition += committedTokens.dim(1)
         state.seedHidden = mtpHidden[0..., (-1)..., 0...]
         state.seedToken = sampleMTPSeed(

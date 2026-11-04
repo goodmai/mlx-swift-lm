@@ -16,18 +16,13 @@ private final class MockMTPDrafter: Module, MTPDrafterModel {
 
     func draftBlock(
         target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
+        input: MTPDraftInput,
         sampler: any LogitSampler
     ) -> MLXArray {
         draftCallCount += 1
-        let batch = lastToken.dim(0)
+        let batch = input.lastToken.dim(0)
         // Return [B, blockSize - 1] zeros — the contract is shape, not value.
-        return MLXArray.zeros([batch, blockSize - 1], dtype: .int32)
+        return MLXArray.zeros([batch, input.blockSize - 1], dtype: .int32)
     }
 }
 
@@ -41,15 +36,15 @@ func testMTPDrafterModelProtocolShape() {
 
     let result = drafter.draftBlock(
         target: target,
-        lastToken: MLXArray([Int32(7)]),
-        lastHidden: MLXArray.zeros([1, 1, 4]),
-        sharedKV: [
-            "full_attention": (MLXArray.zeros([1, 1, 8, 4]), MLXArray.zeros([1, 1, 8, 4])),
-            "sliding_attention": (MLXArray.zeros([1, 1, 8, 4]), MLXArray.zeros([1, 1, 8, 4])),
-        ],
-        positionDeltas: nil,
-        queryOffset: 0,
-        blockSize: 4,
+        input: MTPDraftInput(
+            lastToken: MLXArray([Int32(7)]),
+            lastHidden: MLXArray.zeros([1, 1, 4]),
+            sharedKV: [
+                "full_attention": (MLXArray.zeros([1, 1, 8, 4]), MLXArray.zeros([1, 1, 8, 4])),
+                "sliding_attention": (MLXArray.zeros([1, 1, 8, 4]), MLXArray.zeros([1, 1, 8, 4])),
+            ],
+            queryOffset: 0,
+            blockSize: 4),
         sampler: ArgMaxSampler()
     )
     #expect(drafter.draftCallCount == 1)

@@ -39,46 +39,28 @@ private final class MockDrafter: Module, StatefulMTPDrafterModel {
 
     func draftBlock(
         target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
+        input: MTPDraftInput,
         sampler: any LogitSampler
     ) -> MLXArray {
         var state = makeState(parameters: nil)
-        return draftBlock(
-            target: target,
-            lastToken: lastToken,
-            lastHidden: lastHidden,
-            sharedKV: sharedKV,
-            positionDeltas: positionDeltas,
-            queryOffset: queryOffset,
-            blockSize: blockSize,
-            state: &state,
-            sampler: sampler)
+        return draftBlock(target: target, input: input, state: &state, sampler: sampler)
     }
 
     func draftBlock(
         target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
+        input: MTPDraftInput,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> MLXArray {
+        let blockSize = input.blockSize
         draftBlockCallCount += 1
-        receivedSharedKVSpans.append(sharedKV.mapValues { $0.0.dim(-2) })
-        receivedQueryOffsets.append(queryOffset)
-        receivedPositionDeltaValues.append(positionDeltas?.item(Int.self))
+        receivedSharedKVSpans.append(input.sharedKV.mapValues { $0.0.dim(-2) })
+        receivedQueryOffsets.append(input.queryOffset)
+        receivedPositionDeltaValues.append(input.positionDeltas?.item(Int.self))
         let mutableCache = state.cache.first as? MutableOffsetKVCache
         receivedCacheOffsets.append(mutableCache?.offset)
         mutableCache?.offset += blockSize - 1
-        let batch = lastToken.dim(0)
+        let batch = input.lastToken.dim(0)
         let vals = Array(repeating: draftedTokenValue, count: (blockSize - 1) * batch)
         return MLXArray(vals, [batch, blockSize - 1])
     }

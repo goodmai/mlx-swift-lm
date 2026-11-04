@@ -187,12 +187,12 @@ private func assertDraftBlockMatchesFixture(name: String) async throws {
 
     let drafted = model.draftBlock(
         target: target,
-        lastToken: lastToken,
-        lastHidden: lastHidden,
-        sharedKV: sharedKV,
-        positionDeltas: nil,
-        queryOffset: queryOffset,
-        blockSize: blockSize,
+        input: MTPDraftInput(
+            lastToken: lastToken,
+            lastHidden: lastHidden,
+            sharedKV: sharedKV,
+            queryOffset: queryOffset,
+            blockSize: blockSize),
         sampler: ArgMaxSampler()
     )
 
