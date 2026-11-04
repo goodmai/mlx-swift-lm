@@ -211,7 +211,9 @@ enum Qwen3VLMoELanguage {
             _ x: MLXArray,
             mask: MLXArray?,
             cache: KVCache?,
-            positionIds: MLXArray?
+            positionIds: MLXArray?,
+            probe: (any ForwardProbe)? = nil,
+            layer: Int = 0
         ) -> MLXArray {
             let (batch, length) = (x.dim(0), x.dim(1))
 
@@ -260,7 +262,9 @@ enum Qwen3VLMoELanguage {
                 values: values,
                 cache: cache,
                 scale: scale,
-                mask: attentionMask
+                mask: attentionMask,
+                probe: probe,
+                layer: layer
             )
             .transposed(0, 2, 1, 3)
             .reshaped(batch, length, -1)
@@ -305,7 +309,12 @@ enum Qwen3VLMoELanguage {
         }
 
         func callAsFunction(_ x: MLXArray) -> MLXArray {
+            callAsFunction(x, probe: nil, layer: 0)
+        }
+
+        func callAsFunction(_ x: MLXArray, probe: (any ForwardProbe)?, layer: Int) -> MLXArray {
             var gates = gate(x)
+            if let probe { gates = probe.maskedRouterLogits(layer: layer, gates) }
             gates = MLX.softmax(gates, axis: -1, precise: true)
 
             let kth = gates.dim(-1) - topK
@@ -353,11 +362,17 @@ enum Qwen3VLMoELanguage {
             _ x: MLXArray,
             mask: MLXArray?,
             cache: KVCache?,
-            positionIds: MLXArray?
+            positionIds: MLXArray?,
+            probe: (any ForwardProbe)? = nil,
+            layer: Int = 0
         ) -> MLXArray {
             var residual = attention(
-                inputLayerNorm(x), mask: mask, cache: cache, positionIds: positionIds)
+                inputLayerNorm(x), mask: mask, cache: cache, positionIds: positionIds,
+                probe: probe, layer: layer)
             let hidden = x + residual
+            if let probe, let moe = mlp as? SparseMoeBlock {
+                return hidden + moe(postAttentionLayerNorm(hidden), probe: probe, layer: layer)
+            }
             residual = (mlp as! UnaryLayer)(postAttentionLayerNorm(hidden))
             return hidden + residual
         }
@@ -403,9 +418,12 @@ enum Qwen3VLMoELanguage {
                 mask = createAttentionMask(h: hidden, cache: cache)
             }
 
+            let probe = currentForwardProbe
             for (index, layer) in layers.enumerated() {
                 let layerCache = cache?[index]
-                hidden = layer(hidden, mask: mask, cache: layerCache, positionIds: positionIds)
+                hidden = layer(
+                    hidden, mask: mask, cache: layerCache, positionIds: positionIds, probe: probe,
+                    layer: index)
 
                 if let embeds = deepstackEmbeds, index < embeds.count, let visualMask {
                     hidden = applyDeepstack(
@@ -413,6 +431,7 @@ enum Qwen3VLMoELanguage {
                         visualMask: visualMask,
                         visualEmbeds: embeds[index])
                 }
+                if let probe { hidden = probe.residual(layer: index, hidden) }
             }
 
             return norm(hidden)

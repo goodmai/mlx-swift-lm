@@ -1141,7 +1141,9 @@ enum Qwen3VLLanguage {
             _ x: MLXArray,
             mask: MLXArray?,
             cache: KVCache?,
-            positionIds: MLXArray?
+            positionIds: MLXArray?,
+            probe: (any ForwardProbe)? = nil,
+            layer: Int = 0
         ) -> MLXArray {
             let (batch, length) = (x.dim(0), x.dim(1))
 
@@ -1192,7 +1194,9 @@ enum Qwen3VLLanguage {
                 values: values,
                 cache: cache,
                 scale: scale,
-                mask: attentionMask
+                mask: attentionMask,
+                probe: probe,
+                layer: layer
             )
             .transposed(0, 2, 1, 3)
             .reshaped(batch, length, -1)
@@ -1241,10 +1245,13 @@ enum Qwen3VLLanguage {
             _ x: MLXArray,
             mask: MLXArray?,
             cache: KVCache?,
-            positionIds: MLXArray?
+            positionIds: MLXArray?,
+            probe: (any ForwardProbe)? = nil,
+            layer: Int = 0
         ) -> MLXArray {
             var residual = attention(
-                inputLayerNorm(x), mask: mask, cache: cache, positionIds: positionIds)
+                inputLayerNorm(x), mask: mask, cache: cache, positionIds: positionIds,
+                probe: probe, layer: layer)
             let hidden = x + residual
             residual = mlp(postAttentionLayerNorm(hidden))
             return hidden + residual
@@ -1298,9 +1305,12 @@ enum Qwen3VLLanguage {
                 deepstackIndices = MLXArray(visualIndices.map { UInt32($0) })
             }
 
+            let probe = currentForwardProbe
             for (index, layer) in layers.enumerated() {
                 let layerCache = cache?[index]
-                hidden = layer(hidden, mask: mask, cache: layerCache, positionIds: positionIds)
+                hidden = layer(
+                    hidden, mask: mask, cache: layerCache, positionIds: positionIds, probe: probe,
+                    layer: index)
 
                 if let embeds = deepstackEmbeds, index < embeds.count,
                     let deepstackIndices
@@ -1310,6 +1320,7 @@ enum Qwen3VLLanguage {
                         visualIndices: deepstackIndices,
                         visualEmbeds: embeds[index])
                 }
+                if let probe { hidden = probe.residual(layer: index, hidden) }
             }
 
             return norm(hidden)
