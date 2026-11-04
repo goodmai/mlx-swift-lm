@@ -118,6 +118,15 @@ public final class ModelContainer: Sendable {
         }
     }
 
+    public func performSending<V, R>(
+        nonSendable values: consuming V, _ action: @Sendable (ModelContext, V) async throws -> R
+    ) async rethrows -> sending R {
+        let values = SendableBox(values)
+        return try await context.read {
+            SendableBox(try await action($0, values.consume()))
+        }.consume()
+    }
+
     /// Update the owned `ModelContext`.
     /// - Parameter action: update action
     public func update(_ action: @Sendable (inout ModelContext) -> Void) async {
