@@ -145,7 +145,8 @@ class LFM2Attention: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
+        probe: (any ForwardProbe)? = nil, layer: Int = 0
     ) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
 
@@ -167,7 +168,9 @@ class LFM2Attention: Module {
             values: values,
             cache: cache,
             scale: scale,
-            mask: mask
+            mask: mask,
+            probe: probe,
+            layer: layer
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -294,11 +297,12 @@ class LFM2DecoderLayer: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
+        probe: (any ForwardProbe)? = nil, layer: Int = 0
     ) -> MLXArray {
         let r: MLXArray
         if isAttentionLayer {
-            r = attention!(operatorNorm(x), mask: mask, cache: cache)
+            r = attention!(operatorNorm(x), mask: mask, cache: cache, probe: probe, layer: layer)
         } else {
             r = conv!(operatorNorm(x), cache: cache as? MambaCache)
         }
@@ -349,8 +353,10 @@ public class LFM2ModelInner: Module {
                 return createAttentionMask(h: h, cache: c)
             }()
 
+        let probe = currentForwardProbe
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = layer(h, mask: mask, cache: cache?[i], probe: probe, layer: i)
+            if let probe { h = probe.residual(layer: i, h) }
         }
 
         return embeddingNorm(h)

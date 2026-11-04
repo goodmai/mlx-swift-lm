@@ -286,10 +286,12 @@ private class NemotronHAttention: Module, NemotronHMixer {
         super.init()
     }
 
-    private func attentionForward(
+    func attentionForward(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
-        cache: KVCache?
+        cache: KVCache?,
+        probe: (any ForwardProbe)? = nil,
+        layer: Int = 0
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -306,7 +308,9 @@ private class NemotronHAttention: Module, NemotronHMixer {
             values: values,
             cache: cache,
             scale: scale,
-            mask: mask
+            mask: mask,
+            probe: probe,
+            layer: layer
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -433,8 +437,11 @@ private class NemotronHMoEGate: Module {
         super.init()
     }
 
-    func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
-        let gates = MLX.matmul(x, weight.transposed())
+    func callAsFunction(_ x: MLXArray, probe: (any ForwardProbe)?, layer: Int) -> (
+        MLXArray, MLXArray
+    ) {
+        var gates = MLX.matmul(x, weight.transposed())
+        if let probe { gates = probe.maskedRouterLogits(layer: layer, gates) }
         return groupExpertSelect(
             gates: gates,
             eSCB: eSCB,
@@ -526,7 +533,11 @@ private class NemotronHMoE: Module, UnaryLayer, NemotronHMixer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let (inds, scores) = gate(x)
+        callAsFunction(x, probe: nil, layer: 0)
+    }
+
+    func callAsFunction(_ x: MLXArray, probe: (any ForwardProbe)?, layer: Int) -> MLXArray {
+        let (inds, scores) = gate(x, probe: probe, layer: layer)
         var y = switchMLP(x, inds)
         y = weightedExpertSum(y, scores).asType(y.dtype)
 
@@ -583,9 +594,20 @@ private class NemotronHBlock: Module {
         _ x: MLXArray,
         attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
         ssmMask: MLXArray?,
-        cache: KVCache?
+        cache: KVCache?,
+        probe: (any ForwardProbe)? = nil,
+        layer: Int = 0
     ) -> MLXArray {
         let hidden = norm(x)
+
+        if let probe, let attention = mixer as? NemotronHAttention {
+            return x
+                + attention.attentionForward(
+                    hidden, mask: attentionMask, cache: cache, probe: probe, layer: layer)
+        }
+        if let probe, let moe = mixer as? NemotronHMoE {
+            return x + moe(hidden, probe: probe, layer: layer)
+        }
 
         // Cast to protocol and call - all mixer types conform to NemotronHMixer
         let mixerFunc = mixer as! NemotronHMixer
@@ -677,7 +699,8 @@ private class NemotronHBackbone: Module {
 
         // Track which cache to use for each layer
         var cacheCounter = 0
-        for layer in layers {
+        let probe = currentForwardProbe
+        for (i, layer) in layers.enumerated() {
             let c: KVCache?
             if layer.blockType == .mamba || layer.blockType == .attention {
                 c = cache?[cacheCounter]
@@ -686,7 +709,10 @@ private class NemotronHBackbone: Module {
                 c = nil
             }
 
-            hidden = layer(hidden, attentionMask: attentionMask, ssmMask: ssmMask, cache: c)
+            hidden = layer(
+                hidden, attentionMask: attentionMask, ssmMask: ssmMask, cache: c, probe: probe,
+                layer: i)
+            if let probe { hidden = probe.residual(layer: i, hidden) }
         }
 
         return normF(hidden)

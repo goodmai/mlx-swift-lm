@@ -128,12 +128,14 @@ public final class ModelContainer: Sendable {
     }
 
     /// ``performSending(nonSendable:_:)`` with the model's evaluation lock held around `action`,
-    /// see ``LanguageModel/evaluating(_:)``.
+    /// see ``LanguageModel/evaluating(_:)``, and ``ModelContext/probe`` bound for its forwards.
     nonisolated(nonsending) public func performEvaluating<V, R>(
         nonSendable values: consuming V, _ action: @Sendable (ModelContext, V) throws -> R
     ) async rethrows -> sending R {
         try await performSending(nonSendable: values) { context, values in
-            try context.model.evaluating { try action(context, values) }
+            try context.model.evaluating {
+                try withForwardProbe(context.probe) { try action(context, values) }
+            }
         }
     }
 

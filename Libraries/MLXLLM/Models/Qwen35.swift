@@ -535,7 +535,7 @@ final class Qwen35Attention: Module {
 
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
-        positionOffset: Int? = nil
+        positionOffset: Int? = nil, probe: (any ForwardProbe)? = nil, layer: Int = 0
     ) -> MLXArray {
         let (q, gate, k, values) = projectPreRope(x)
 
@@ -549,7 +549,9 @@ final class Qwen35Attention: Module {
             values: values,
             cache: cache,
             scale: scale,
-            mask: mask
+            mask: mask,
+            probe: probe,
+            layer: layer
         )
 
         return mergeHeadsAndProject(attention: output, gate: gate)
@@ -637,8 +639,9 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
 
     /// The uncompiled body; an enclosing layer trace inlines it rather than
     /// nesting this block's own compiled wrapper.
-    func forward(_ x: MLXArray) -> MLXArray {
+    func forward(_ x: MLXArray, probe: (any ForwardProbe)? = nil, layer: Int = 0) -> MLXArray {
         var gates = gate(x)
+        if let probe { gates = probe.maskedRouterLogits(layer: layer, gates) }
         gates = MLX.softmax(gates, axis: -1, precise: true)
 
         let (inds, scores) = moeRouterTopK(
@@ -709,12 +712,14 @@ final class Qwen35DecoderLayer: Module {
         ssmMask: MLXArray?,
         cache: KVCache?,
         positionOffset: Int? = nil,
-        checkpointAfter: Int? = nil
+        checkpointAfter: Int? = nil,
+        probe: (any ForwardProbe)? = nil,
+        layer: Int = 0
     ) -> MLXArray {
         // Single-token unmasked decode runs the layer as one traced function
         // (two for full attention, split at the KV write). Everything else
-        // takes the general body below.
-        if x.dim(1) == 1, ssmMask == nil {
+        // takes the general body below. A probe needs the eager body.
+        if x.dim(1) == 1, ssmMask == nil, probe == nil {
             if isLinear, let mambaCache = cache as? MambaCache {
                 return decodeLinearLayer(x, cache: mambaCache)
             }
@@ -731,10 +736,13 @@ final class Qwen35DecoderLayer: Module {
         } else {
             r = selfAttn!(
                 inputLayerNorm(x), mask: attentionMask, cache: cache,
-                positionOffset: positionOffset)
+                positionOffset: positionOffset, probe: probe, layer: layer)
         }
 
         let h = x + r
+        if let probe, let moe = mlp as? Qwen35SparseMoeBlock {
+            return h + moe.forward(postAttentionLayerNorm(h), probe: probe, layer: layer)
+        }
         return h + (mlp as! UnaryLayer)(postAttentionLayerNorm(h))
     }
 
@@ -906,7 +914,8 @@ public class Qwen35TextModelInner: Module {
         applyFinalNorm: Bool,
         checkpointAfter: Int? = nil
     ) -> MLXArray {
-        if applyFinalNorm, inputs.dim(1) == 1, let caches = cache,
+        let probe = currentForwardProbe
+        if probe == nil, applyFinalNorm, inputs.dim(1) == 1, let caches = cache,
             let step = decodeStep(inputs, caches)
         {
             return step
@@ -929,7 +938,8 @@ public class Qwen35TextModelInner: Module {
                 ? MLXFast.ScaledDotProductAttentionMaskMode.none : faMask
             hiddenStates = layer(
                 hiddenStates, attentionMask: attnMask, ssmMask: mask, cache: cacheArray?[i],
-                checkpointAfter: checkpointAfter)
+                checkpointAfter: checkpointAfter, probe: probe, layer: i)
+            if let probe { hiddenStates = probe.residual(layer: i, hiddenStates) }
         }
 
         return applyFinalNorm ? norm(hiddenStates) : hiddenStates

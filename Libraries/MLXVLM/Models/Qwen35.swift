@@ -373,7 +373,9 @@ public enum Qwen35Language {
             _ x: MLXArray,
             mask: MLXArray?,
             cache: KVCache?,
-            positionIds: MLXArray?
+            positionIds: MLXArray?,
+            probe: (any ForwardProbe)? = nil,
+            layer: Int = 0
         ) -> MLXArray {
             let B = x.dim(0)
             let L = x.dim(1)
@@ -421,7 +423,9 @@ public enum Qwen35Language {
                 values: values,
                 cache: cache,
                 scale: scale,
-                mask: attentionMask
+                mask: attentionMask,
+                probe: probe,
+                layer: layer
             )
             .transposed(0, 2, 1, 3)
             .reshaped(B, L, -1)
@@ -739,7 +743,12 @@ public enum Qwen35Language {
         }
 
         open func callAsFunction(_ x: MLXArray) -> MLXArray {
+            callAsFunction(x, probe: nil, layer: 0)
+        }
+
+        func callAsFunction(_ x: MLXArray, probe: (any ForwardProbe)?, layer: Int) -> MLXArray {
             var gates = gate(x)
+            if let probe { gates = probe.maskedRouterLogits(layer: layer, gates) }
             gates = MLX.softmax(gates, axis: -1, precise: true)
 
             let (inds, scores) = moeRouterTopK(
@@ -801,7 +810,9 @@ public enum Qwen35Language {
             ssmMask: MLXArray?,
             cache: KVCache?,
             positionIds: MLXArray?,
-            checkpointAfter: Int? = nil
+            checkpointAfter: Int? = nil,
+            probe: (any ForwardProbe)? = nil,
+            layer: Int = 0
         ) -> MLXArray {
             let r: MLXArray
             if isLinear {
@@ -810,10 +821,14 @@ public enum Qwen35Language {
                     checkpointAfter: checkpointAfter)
             } else {
                 r = selfAttn!(
-                    inputLayerNorm(x), mask: attentionMask, cache: cache, positionIds: positionIds)
+                    inputLayerNorm(x), mask: attentionMask, cache: cache, positionIds: positionIds,
+                    probe: probe, layer: layer)
             }
 
             let h = x + r
+            if let probe, let moe = mlp as? SparseMoeBlock {
+                return h + moe(postAttentionLayerNorm(h), probe: probe, layer: layer)
+            }
             return h + (mlp as! UnaryLayer)(postAttentionLayerNorm(h))
         }
     }
@@ -869,6 +884,7 @@ public enum Qwen35Language {
                 faMask = nil
             }
             let ssmMask = createSSMMask(h: hiddenStates, cache: cacheArray?[ssmIdx] as? MambaCache)
+            let probe = currentForwardProbe
 
             for (index, layer) in layers.enumerated() {
                 let layerSSMMask = layer.isLinear ? ssmMask : nil
@@ -878,8 +894,11 @@ public enum Qwen35Language {
                     ssmMask: layerSSMMask,
                     cache: cacheArray?[index],
                     positionIds: positionIds,
-                    checkpointAfter: checkpointAfter
+                    checkpointAfter: checkpointAfter,
+                    probe: probe,
+                    layer: index
                 )
+                if let probe { hiddenStates = probe.residual(layer: index, hiddenStates) }
             }
 
             return applyFinalNorm ? norm(hiddenStates) : hiddenStates

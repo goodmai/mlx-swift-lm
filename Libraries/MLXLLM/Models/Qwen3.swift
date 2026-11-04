@@ -54,7 +54,8 @@ class Qwen3Attention: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
+        probe: (any ForwardProbe)? = nil, layer: Int = 0
     ) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
 
@@ -79,7 +80,9 @@ class Qwen3Attention: Module {
             values: values,
             cache: cache,
             scale: scale,
-            mask: mask
+            mask: mask,
+            probe: probe,
+            layer: layer
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -121,9 +124,10 @@ class Qwen3TransformerBlock: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
+        probe: (any ForwardProbe)? = nil, layer: Int = 0
     ) -> MLXArray {
-        var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
+        var r = attention(inputLayerNorm(x), mask: mask, cache: cache, probe: probe, layer: layer)
         let h = x + r
         r = mlp(postAttentionLayerNorm(h))
         let out = h + r
@@ -154,9 +158,11 @@ public class Qwen3ModelInner: Module {
         var h = embedTokens(inputs)
 
         let mask = createAttentionMask(h: h, cache: cache?.first)
+        let probe = currentForwardProbe
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = layer(h, mask: mask, cache: cache?[i], probe: probe, layer: i)
+            if let probe { h = probe.residual(layer: i, h) }
         }
 
         return norm(h)

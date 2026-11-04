@@ -303,7 +303,8 @@ private class Gemma4Attention: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: KVCache? = nil,
         sharedKV: Gemma4SharedKVState? = nil,
-        positionOffset: RoPEOffset? = nil
+        positionOffset: RoPEOffset? = nil,
+        probe: (any ForwardProbe)? = nil
     ) -> (MLXArray, Gemma4SharedKVState, RoPEOffset?) {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
@@ -370,15 +371,18 @@ private class Gemma4Attention: Module {
             }
         }
 
-        let attentionOutput: MLXArray =
+        var attentionOutput: MLXArray =
             switch kvState {
             case .regular(let keys, let values):
-                MLXFast.scaledDotProductAttention(
+                attentionWithCacheUpdate(
                     queries: queries,
                     keys: keys,
                     values: values,
+                    cache: nil,
                     scale: scale,
-                    mask: adjustedMask ?? .none
+                    mask: adjustedMask ?? .none,
+                    probe: probe,
+                    layer: layerIdx
                 )
             case .quantized(let keys, let values, let groupSize, let bits, let mode):
                 quantizedScaledDotProductAttention(
@@ -392,6 +396,9 @@ private class Gemma4Attention: Module {
                     mode: mode
                 )
             }
+        if let probe, case .quantized = kvState {
+            attentionOutput = probe.maskedHeads(layer: layerIdx, attentionOutput)
+        }
 
         let output =
             attentionOutput
@@ -456,10 +463,13 @@ private class Gemma4TextRouter: Module {
         super.init()
     }
 
-    func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
+    func callAsFunction(_ x: MLXArray, probe: (any ForwardProbe)? = nil, layer: Int = 0) -> (
+        MLXArray, MLXArray
+    ) {
         let normed = MLXFast.rmsNorm(
             x, weight: (scale * rootSize).asType(x.dtype), eps: rmsNormEps)
-        let scores = proj(normed)
+        var scores = proj(normed)
+        if let probe { scores = probe.maskedRouterLogits(layer: layer, scores) }
         let (topKIndices, selected) = moeRouterTopK(scores, k: topKExperts, normalize: false)
         var topKWeights = MLX.softmax(selected, axis: -1)
         topKWeights = topKWeights * perExpertScale[topKIndices].asType(topKWeights.dtype)
@@ -603,13 +613,15 @@ private class Gemma4TextExperts: Module {
         cache: KVCache? = nil,
         perLayerInput: MLXArray? = nil,
         sharedKV: Gemma4SharedKVState? = nil,
-        positionOffset: RoPEOffset? = nil
+        positionOffset: RoPEOffset? = nil,
+        probe: (any ForwardProbe)? = nil
     ) -> (MLXArray, Gemma4SharedKVState, RoPEOffset?) {
         let residual = x
 
         let h = inputLayernorm(x)
         let (attnOut, kvPair, attnPositionOffset) = selfAttn(
-            h, mask: mask, cache: cache, sharedKV: sharedKV, positionOffset: positionOffset)
+            h, mask: mask, cache: cache, sharedKV: sharedKV, positionOffset: positionOffset,
+            probe: probe)
         // Fused: residual + RMSNorm(attnOut) * weight
         var out = _addRMSNorm(residual, attnOut, postAttentionLayernorm.weight)
 
@@ -628,7 +640,7 @@ private class Gemma4TextExperts: Module {
             dense = pfln1(dense)
 
             // Sparse branch
-            let (topKIndices, topKWeights) = router(out)
+            let (topKIndices, topKWeights) = router(out, probe: probe, layer: layerIdx)
             var sparse = pfln2pre(out)
             sparse = experts(sparse, topKIndices: topKIndices, topKWeights: topKWeights)
             sparse = pfln2(sparse)
@@ -812,6 +824,7 @@ private class Gemma4TextExperts: Module {
         // Forward through layers, tracking intermediate KV pairs for sharing
         var intermediates = [(kv: Gemma4SharedKVState?, positionOffset: RoPEOffset?)](
             repeating: (nil, nil), count: config.numHiddenLayers)
+        let probe = currentForwardProbe
 
         for (idx, layer) in layers.enumerated() {
             let prevIdx = previousKvs[idx]
@@ -825,9 +838,11 @@ private class Gemma4TextExperts: Module {
                 cache: fullCache[idx],
                 perLayerInput: perLayerInputs[idx],
                 sharedKV: sharedKV,
-                positionOffset: sharedPositionOffset
+                positionOffset: sharedPositionOffset,
+                probe: probe
             )
             h = out
+            if let probe { h = probe.residual(layer: idx, h) }
             intermediates[idx] = (kvPair, positionOffset)
         }
 

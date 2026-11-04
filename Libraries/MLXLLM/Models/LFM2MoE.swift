@@ -145,7 +145,9 @@ class LFM2MoEAttention: Module {
     func callAsFunction(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
-        cache: KVCache?
+        cache: KVCache?,
+        probe: (any ForwardProbe)? = nil,
+        layer: Int = 0
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -168,7 +170,9 @@ class LFM2MoEAttention: Module {
             values: values,
             cache: cache,
             scale: scale,
-            mask: mask
+            mask: mask,
+            probe: probe,
+            layer: layer
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -293,8 +297,11 @@ class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
 
     /// Returns top-k experts and unbiased sigmoid routing weights.
     /// `expert_bias` affects selection only.
-    func route(_ x: MLXArray) -> (indices: MLXArray, weights: MLXArray) {
-        let gates = gate(x)
+    func route(_ x: MLXArray, probe: (any ForwardProbe)? = nil, layer: Int = 0) -> (
+        indices: MLXArray, weights: MLXArray
+    ) {
+        var gates = gate(x)
+        if let probe { gates = probe.maskedRouterLogits(layer: layer, gates) }
         var (indices, weights) = sigmoidBiasRouterTopK(
             gates, bias: useExpertBias ? expertBias : nil, k: topK, normalize: normTopKProb,
             fused: gates.size == gates.dim(-1))
@@ -305,7 +312,11 @@ class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let (indices, weights) = route(x)
+        callAsFunction(x, probe: nil, layer: 0)
+    }
+
+    func callAsFunction(_ x: MLXArray, probe: (any ForwardProbe)?, layer: Int) -> MLXArray {
+        let (indices, weights) = route(x, probe: probe, layer: layer)
         let expertOutputs = switchMLP(x, indices)
         return weightedExpertSum(expertOutputs, weights.asType(x.dtype))
     }
@@ -345,17 +356,22 @@ class LFM2MoEDecoderLayer: Module {
         _ x: MLXArray,
         attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
         ssmMask: MLXArray?,
-        cache: KVCache?
+        cache: KVCache?,
+        probe: (any ForwardProbe)? = nil,
+        layer: Int = 0
     ) -> MLXArray {
         let residual = operatorNorm(x)
         let r: MLXArray
         if isAttentionLayer {
-            r = attention!(residual, mask: attentionMask, cache: cache)
+            r = attention!(residual, mask: attentionMask, cache: cache, probe: probe, layer: layer)
         } else {
             r = conv!(residual, mask: ssmMask, cache: cache as? MambaCache)
         }
 
         let h = x + r
+        if let probe, let moe = feedForward as? Lfm2MoeSparseMoeBlock {
+            return h + moe(ffnNorm(h), probe: probe, layer: layer)
+        }
         let out = feedForward(ffnNorm(h))
         return h + out
     }
@@ -409,8 +425,12 @@ public class LFM2MoEModelInner: Module {
             return createSSMMask(h: hidden, cache: cache[index] as? MambaCache)
         }()
 
+        let probe = currentForwardProbe
         for (i, layer) in layers.enumerated() {
-            hidden = layer(hidden, attentionMask: attentionMask, ssmMask: ssmMask, cache: cache?[i])
+            hidden = layer(
+                hidden, attentionMask: attentionMask, ssmMask: ssmMask, cache: cache?[i],
+                probe: probe, layer: i)
+            if let probe { hidden = probe.residual(layer: i, hidden) }
         }
 
         return embeddingNorm(hidden)

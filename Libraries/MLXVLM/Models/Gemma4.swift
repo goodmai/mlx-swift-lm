@@ -697,11 +697,14 @@ final class Gemma4TextRouter: Module {
         super.init()
     }
 
-    func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
+    func callAsFunction(_ x: MLXArray, probe: (any ForwardProbe)? = nil, layer: Int = 0) -> (
+        MLXArray, MLXArray
+    ) {
         let normed = MLXFast.rmsNorm(
             x, weight: (scale * rootSize).asType(x.dtype), eps: config.rmsNormEps)
 
-        let scores = proj(normed)
+        var scores = proj(normed)
+        if let probe { scores = probe.maskedRouterLogits(layer: layer, scores) }
 
         let (topKIndices, selected) = moeRouterTopK(scores, k: topKExperts, normalize: false)
         var topKWeights = MLX.softmax(selected, axis: -1)
@@ -843,7 +846,8 @@ final class Gemma4TextAttention: Module {
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
         cache: KVCache? = nil,
         sharedKV: Gemma4SharedKVState? = nil,
-        offset: Int? = nil
+        offset: Int? = nil,
+        probe: (any ForwardProbe)? = nil
     ) -> (MLXArray, Gemma4SharedKVState?, Int) {
         let (batch, length, _) = (x.dim(0), x.dim(1), x.dim(2))
 
@@ -902,15 +906,18 @@ final class Gemma4TextAttention: Module {
         }
         let localMask = gemma4AdjustAttentionMask(mask, keyLength: kvState.sequenceLength)
 
-        let output: MLXArray =
+        var output: MLXArray =
             switch kvState {
             case .regular(let keys, let values):
-                MLXFast.scaledDotProductAttention(
+                attentionWithCacheUpdate(
                     queries: queries,
                     keys: keys,
                     values: values,
+                    cache: nil,
                     scale: scale,
-                    mask: localMask
+                    mask: localMask,
+                    probe: probe,
+                    layer: layerIdx
                 )
             case .quantized(let keys, let values, let groupSize, let bits, let mode):
                 quantizedScaledDotProductAttention(
@@ -924,6 +931,9 @@ final class Gemma4TextAttention: Module {
                     mode: mode
                 )
             }
+        if let probe, case .quantized = kvState {
+            output = probe.maskedHeads(layer: layerIdx, output)
+        }
 
         return (
             oProj(output.transposed(0, 2, 1, 3).reshaped(batch, length, -1)),
@@ -1001,12 +1011,13 @@ final class Gemma4TextDecoderLayer: Module {
         cache: KVCache? = nil,
         perLayerInput: MLXArray? = nil,
         sharedKV: Gemma4SharedKVState? = nil,
-        offset: Int? = nil
+        offset: Int? = nil,
+        probe: (any ForwardProbe)? = nil
     ) -> (MLXArray, Gemma4SharedKVState?, Int) {
         var residual = x
         var h = inputLayerNorm(x)
         let (attentionOutput, kvState, attentionOffset) = selfAttention(
-            h, mask: mask, cache: cache, sharedKV: sharedKV, offset: offset)
+            h, mask: mask, cache: cache, sharedKV: sharedKV, offset: offset, probe: probe)
         h = attentionOutput
         h = postAttentionLayerNorm(h)
         h = residual + h
@@ -1023,7 +1034,8 @@ final class Gemma4TextDecoderLayer: Module {
             dense = mlp(dense)
             dense = postFeedforwardLayerNorm1(dense)
 
-            let (topKIndices, topKWeights) = router(h)
+            let (topKIndices, topKWeights) = router(
+                h, probe: probe, layer: selfAttention.layerIdx)
             var sparse = preFeedforwardLayerNorm2(h)
             sparse = experts(sparse, topKIndices: topKIndices, topKWeights: topKWeights)
             sparse = postFeedforwardLayerNorm2(sparse)
@@ -1282,6 +1294,7 @@ final class Gemma4TextBackbone: Module {
         var h = h0
         var intermediates = [(kv: Gemma4SharedKVState?, offset: Int?)](
             repeating: (nil, nil), count: config.hiddenLayers)
+        let probe = currentForwardProbe
         for (idx, layer) in layers.enumerated() {
             let sourceIdx = layerIdxToCacheIdx[idx]
             let layerCache: KVCache? =
@@ -1310,9 +1323,11 @@ final class Gemma4TextBackbone: Module {
                 sharedKV: idx >= firstKVSharedLayerIdx
                     ? intermediates[sourceIdx].kv : nil,
                 offset: idx >= firstKVSharedLayerIdx
-                    ? intermediates[sourceIdx].offset : nil
+                    ? intermediates[sourceIdx].offset : nil,
+                probe: probe
             )
             h = output
+            if let probe { h = probe.residual(layer: idx, h) }
             intermediates[idx] = (kvState, attentionOffset)
         }
         let finalHidden = norm(h)

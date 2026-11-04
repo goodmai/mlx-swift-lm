@@ -80,6 +80,8 @@ public struct ModelContext {
     public var tokenizer: Tokenizer
     public var mtpDrafter: (any MTPDrafterModel)?
     public var batch: AnyObject?
+    /// Bound around ``ModelContainer/performEvaluating(nonSendable:_:)``; see ``ForwardProbe``.
+    public var probe: (any ForwardProbe)?
 
     public init(
         configuration: ModelConfiguration, model: any LanguageModel,

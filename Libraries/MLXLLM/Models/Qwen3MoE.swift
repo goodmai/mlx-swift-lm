@@ -63,7 +63,8 @@ class Qwen3MoEAttention: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
+        probe: (any ForwardProbe)? = nil, layer: Int = 0
     ) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
 
@@ -86,7 +87,9 @@ class Qwen3MoEAttention: Module {
             values: values,
             cache: cache,
             scale: scale,
-            mask: mask
+            mask: mask,
+            probe: probe,
+            layer: layer
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -131,7 +134,12 @@ class Qwen3MoESparseMoeBlock: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let gates = gate(x)
+        callAsFunction(x, probe: nil, layer: 0)
+    }
+
+    func callAsFunction(_ x: MLXArray, probe: (any ForwardProbe)?, layer: Int) -> MLXArray {
+        var gates = gate(x)
+        if let probe { gates = probe.maskedRouterLogits(layer: layer, gates) }
         let softGates = MLX.softmax(gates, axis: -1, precise: true)
 
         let k = topK
@@ -185,11 +193,17 @@ class Qwen3MoeDecoderLayer: Module {
     }
 
     func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
+        probe: (any ForwardProbe)? = nil
     ) -> MLXArray {
-        var r = selfAttn(inputLayerNorm(x), mask: mask, cache: cache)
+        var r = selfAttn(
+            inputLayerNorm(x), mask: mask, cache: cache, probe: probe, layer: layerIdx)
         let h = x + r
-        r = mlp(postAttentionLayerNorm(h))
+        if let probe, let moe = mlp as? Qwen3MoESparseMoeBlock {
+            r = moe(postAttentionLayerNorm(h), probe: probe, layer: layerIdx)
+        } else {
+            r = mlp(postAttentionLayerNorm(h))
+        }
         let out = h + r
         return out
     }
@@ -220,9 +234,11 @@ public class Qwen3MoEModelInner: Module {
         var h = embedTokens(inputs)
 
         let mask = createAttentionMask(h: h, cache: cache?.first)
+        let probe = currentForwardProbe
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = layer(h, mask: mask, cache: cache?[i], probe: probe)
+            if let probe { h = probe.residual(layer: i, h) }
         }
 
         return norm(h)
