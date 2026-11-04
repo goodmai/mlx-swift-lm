@@ -118,7 +118,7 @@ public final class ModelContainer: Sendable {
         }
     }
 
-    public func performSending<V, R>(
+    nonisolated(nonsending) public func performSending<V, R>(
         nonSendable values: consuming V, _ action: @Sendable (ModelContext, V) async throws -> R
     ) async rethrows -> sending R {
         let values = SendableBox(values)
