@@ -79,6 +79,7 @@ public struct ModelContext {
     public var processor: any UserInputProcessor
     public var tokenizer: Tokenizer
     public var mtpDrafter: (any MTPDrafterModel)?
+    public var batch: AnyObject?
 
     public init(
         configuration: ModelConfiguration, model: any LanguageModel,
