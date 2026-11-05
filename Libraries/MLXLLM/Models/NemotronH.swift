@@ -387,7 +387,7 @@ private func groupExpertSelect(
 
         // Keep only top topkGroup groups (zero out the rest)
         let k = nGroup - topkGroup
-        var groupIdx = argPartition(topKGroupScores, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
+        var groupIdx = stopGradient(argPartition(topKGroupScores, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...])
         groupIdx = broadcast(groupIdx, to: [bsz, seqLen, k, expertsPerGroup])
 
         // Zero out scores from non-selected groups
@@ -398,7 +398,7 @@ private func groupExpertSelect(
     }
 
     // Get top-k experts
-    let inds = argPartition(-scores, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
+    let inds = stopGradient(argPartition(-scores, kth: topK - 1, axis: -1)[.ellipsis, ..<topK])
     var finalScores = takeAlong(origScores, inds, axis: -1)
 
     // Normalize if needed

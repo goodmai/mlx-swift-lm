@@ -150,7 +150,7 @@ class Qwen3MoESparseMoeBlock: Module, UnaryLayer {
                 selection: gates, values: softGates, k: k,
                 normalize: normTopkProb, order: .descending)
         } else {
-            inds = MLX.argPartition(-gates, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+            inds = MLX.stopGradient(MLX.argPartition(-gates, kth: k - 1, axis: -1)[.ellipsis, ..<k])
             var selected = MLX.takeAlong(softGates, inds, axis: -1)
             if normTopkProb {
                 selected = selected / MLX.sum(selected, axis: -1, keepDims: true)
