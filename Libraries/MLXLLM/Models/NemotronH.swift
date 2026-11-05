@@ -382,9 +382,8 @@ private func groupExpertSelect(
         // Reshape to [batch, seq, n_group, experts_per_group]
         let groupScores = scores.reshaped(bsz, seqLen, nGroup, -1)
 
-        // Get top-2 per group and sum for group scores (using sorted to get top values)
-        let topKGroupScores = sorted(groupScores, axis: -1)[.ellipsis, ..<2].sum(
-            axis: -1, keepDims: true)
+        // Sum of the two largest scores per group
+        let topKGroupScores = top(groupScores, k: 2, axis: -1).sum(axis: -1, keepDims: true)
 
         // Keep only top topkGroup groups (zero out the rest)
         let k = nGroup - topkGroup
