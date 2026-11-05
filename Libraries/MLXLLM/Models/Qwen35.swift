@@ -12,6 +12,8 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+let compiledVerifyBlock = max(1, Int(ProcessInfo.processInfo.environment["MLX_COMPILED_VERIFY"] ?? "") ?? 1)
+
 // MARK: - Configuration
 
 private enum RopeParametersCodingKey: String, CodingKey {
@@ -915,7 +917,7 @@ public class Qwen35TextModelInner: Module {
         checkpointAfter: Int? = nil
     ) -> MLXArray {
         let probe = currentForwardProbe
-        if probe == nil, applyFinalNorm, inputs.dim(1) == 1, let caches = cache,
+        if probe == nil, applyFinalNorm, inputs.dim(1) <= compiledVerifyBlock, let caches = cache,
             let step = decodeStep(inputs, caches)
         {
             return step
@@ -1011,9 +1013,12 @@ public class Qwen35TextModelInner: Module {
         // The schedule is only valid when the masks the general path would
         // build both come out empty.
         if createSSMMask(h: inputs, cache: cache[ssmIdx] as? MambaCache) != nil { return nil }
-        guard let faCache = cache[faIdx],
-            case .none = createAttentionMask(h: inputs, cache: faCache)
-        else { return nil }
+        guard let faCache = cache[faIdx] else { return nil }
+        let mask = createAttentionMask(h: inputs, cache: faCache)
+        switch mask {
+        case .none, .causal: break
+        default: return nil
+        }
 
         // Cache kinds can change mid-generation (`maybeQuantizeKVCache` swaps
         // array entries), so eligibility is re-checked every step.
@@ -1049,7 +1054,7 @@ public class Qwen35TextModelInner: Module {
                 let mambaCache = mambaCaches[layerIndex]!
                 mambaCache[0] = outputs[1 + 2 * i]
                 mambaCache[1] = outputs[2 + 2 * i]
-                mambaCache.advance(1)
+                mambaCache.advance(inputs.dim(1))
             }
 
             pendingAttention = []
@@ -1057,7 +1062,7 @@ public class Qwen35TextModelInner: Module {
                 let head = segment.attentionOutputOffset
                 let attention = layers[pre].attentionCacheStep(
                     queries: outputs[head], keys: outputs[head + 2],
-                    values: outputs[head + 3], cache: cache[pre]!, mask: .none)
+                    values: outputs[head + 3], cache: cache[pre]!, mask: mask)
                 pendingAttention = [attention, outputs[head + 1]]
             }
         }
