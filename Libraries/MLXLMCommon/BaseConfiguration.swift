@@ -45,6 +45,8 @@ public struct BaseConfiguration: Codable, Sendable {
         /// to map floating point values to integers.
         public var mode: QuantizationMode { _mode ?? .affine }
 
+        public var quantMethod: String? = nil
+
         /// Converts the configuration into a tuple format compatible with `MLX.quantize`.
         public var asTuple: (Int, Int, QuantizationMode) { (groupSize, bits, mode) }
 
@@ -52,6 +54,7 @@ public struct BaseConfiguration: Codable, Sendable {
             case groupSize = "group_size"
             case bits = "bits"
             case _mode = "mode"
+            case quantMethod = "quant_method"
         }
     }
 

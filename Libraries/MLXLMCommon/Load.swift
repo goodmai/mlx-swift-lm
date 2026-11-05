@@ -384,10 +384,14 @@ public func loadWeights(
     // per-model cleanup (models can inspect metadata to customize behavior)
     weights = model.sanitize(weights: weights, metadata: metadata)
 
+    if (quantization ?? perLayerQuantization?.quantization)?.quantMethod == NF4.method {
+        try NF4Linear.install(in: model, weights: weights)
+    }
+
     // quantize if needed
     if quantization != nil || perLayerQuantization != nil {
         quantize(model: model) { path, module in
-            if weights["\(path).scales"] != nil {
+            if weights["\(path).scales"] != nil, !(module is NF4Linear) {
                 if let perLayerQuantization {
                     return perLayerQuantization.quantization(layer: path)?.asTuple
                 } else {
