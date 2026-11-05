@@ -331,12 +331,51 @@ public final class GrammarConstraint: @unchecked Sendable {
     ///     grammar uses `"start"`, matching the existing Lark shape.
     ///   - fastForward: Same semantics as the `jsonSchema:` init.
     ///   - hostTokenizer: Same semantics as the `jsonSchema:` init.
-    public init(
+    public convenience init(
         tokenizer: GrammarTokenizer,
         grammar: String,
         rootRule: String? = nil,
         fastForward: Bool = false,
         hostTokenizer: (any Tokenizer)? = nil
+    ) throws {
+        try self.init(
+            tokenizer: tokenizer, fastForward: fastForward, hostTokenizer: hostTokenizer,
+            source: "xg_compile_grammar_from_ebnf"
+        ) { compiler, compiled in
+            grammar.withCString { grammarPtr in
+                if let rootRule {
+                    return rootRule.withCString { rootPtr in
+                        xg_compile_grammar_from_ebnf(compiler, grammarPtr, rootPtr, &compiled)
+                    }
+                }
+                return xg_compile_grammar_from_ebnf(compiler, grammarPtr, nil, &compiled)
+            }
+        }
+    }
+
+    /// Compile a regular expression into a matcher (xgrammar's
+    /// `Grammar::FromRegex`). Unsupported syntax surfaces as
+    /// `GrammarError.constraintCompilationFailed` with xgrammar's message.
+    public convenience init(
+        tokenizer: GrammarTokenizer,
+        regex: String,
+        fastForward: Bool = false,
+        hostTokenizer: (any Tokenizer)? = nil
+    ) throws {
+        try self.init(
+            tokenizer: tokenizer, fastForward: fastForward, hostTokenizer: hostTokenizer,
+            source: "xg_compile_grammar_from_regex"
+        ) { compiler, compiled in
+            regex.withCString { xg_compile_grammar_from_regex(compiler, $0, &compiled) }
+        }
+    }
+
+    private init(
+        tokenizer: GrammarTokenizer,
+        fastForward: Bool,
+        hostTokenizer: (any Tokenizer)?,
+        source: String,
+        compile: (OpaquePointer, inout OpaquePointer?) -> XGStatus
     ) throws {
         self.tokenizer = tokenizer
         self.vocabSize = Int32(tokenizer.vocabSize)
@@ -355,20 +394,11 @@ public final class GrammarConstraint: @unchecked Sendable {
         }
 
         var compiledPtr: OpaquePointer?
-        let compileStatus: XGStatus = grammar.withCString { grammarPtr in
-            if let rootRule {
-                return rootRule.withCString { rootPtr in
-                    xg_compile_grammar_from_ebnf(
-                        compilerHandle, grammarPtr, rootPtr, &compiledPtr)
-                }
-            }
-            return xg_compile_grammar_from_ebnf(compilerHandle, grammarPtr, nil, &compiledPtr)
-        }
+        let compileStatus = compile(compilerHandle, &compiledPtr)
         guard compileStatus == XG_OK, let compiledHandle = compiledPtr else {
             xg_grammar_compiler_free(compilerHandle)
             throw GrammarError.constraintCompilationFailed(
-                Self.captureShimError(
-                    status: compileStatus, fallback: "xg_compile_grammar_from_ebnf")
+                Self.captureShimError(status: compileStatus, fallback: source)
             )
         }
 

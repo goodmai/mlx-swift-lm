@@ -352,6 +352,22 @@ XGStatus xg_compile_grammar_from_ebnf(
     });
 }
 
+XGStatus xg_compile_grammar_from_regex(
+    XGGrammarCompiler *compiler,
+    const char *regex_text,
+    XGCompiledGrammar **out_compiled
+) {
+    if (compiler == nullptr) return XG_ERR_INTERNAL;
+    if (regex_text == nullptr) return XG_ERR_INTERNAL;
+    if (out_compiled == nullptr) return XG_ERR_INTERNAL;
+
+    return WithExceptionBoundary(XG_ERR_INTERNAL, [&]() -> XGStatus {
+        xgrammar::Grammar grammar = xgrammar::Grammar::FromRegex(std::string(regex_text));
+        *out_compiled = new XGCompiledGrammar{compiler->inner.CompileGrammar(grammar)};
+        return XG_OK;
+    });
+}
+
 XGStatus xg_compile_structural_tag(
     XGGrammarCompiler *compiler,
     const char *structural_tag_json,

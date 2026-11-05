@@ -229,6 +229,16 @@ XGStatus xg_compile_grammar_from_ebnf(
     XGCompiledGrammar **out_compiled
 );
 
+/**
+ * Compile a regular expression into a grammar through
+ * `xgrammar::Grammar::FromRegex(regex)` and `CompileGrammar`.
+ */
+XGStatus xg_compile_grammar_from_regex(
+    XGGrammarCompiler *compiler,
+    const char *regex_text,
+    XGCompiledGrammar **out_compiled
+);
+
 /*
  * Parse `structural_tag_json` as xgrammar's structural-tag JSON format
  * and compile it against the compiler's bound tokenizer in one call.
