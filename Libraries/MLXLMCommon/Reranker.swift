@@ -55,6 +55,12 @@ public struct RerankExecutionOptions: Sendable {
     /// Behavior when an input exceeds the model context limit.
     public var truncation: RerankTruncationPolicy
 
+    /// Called before each pairwise micro-batch. Returning `true` scores that micro-batch one
+    /// document at a time, calling this again before each document, so a caller can yield the
+    /// GPU between forward passes. Batching is unchanged while it returns `false`.
+    /// Listwise rerankers score every document in one prompt and never call it.
+    public var beforeMicroBatch: (@Sendable () async -> Bool)?
+
     /// Create execution options for pairwise and listwise rerankers.
     ///
     /// - Parameters:
@@ -62,16 +68,41 @@ public struct RerankExecutionOptions: Sendable {
     ///   - maxBatchTokens: Maximum token allocation for one model forward pass.
     ///   - prefillStepSize: Preferred cached prefill chunk size for causal models.
     ///   - truncation: Behavior for inputs that exceed the model context limit.
+    ///   - beforeMicroBatch: Called before each pairwise micro-batch; `true` splits it into
+    ///     single documents.
     public init(
         maxBatchSize: Int = 16,
         maxBatchTokens: Int = 8_192,
         prefillStepSize: Int = 512,
-        truncation: RerankTruncationPolicy = .truncate
+        truncation: RerankTruncationPolicy = .truncate,
+        beforeMicroBatch: (@Sendable () async -> Bool)? = nil
     ) {
         self.maxBatchSize = maxBatchSize
         self.maxBatchTokens = maxBatchTokens
         self.prefillStepSize = prefillStepSize
         self.truncation = truncation
+        self.beforeMicroBatch = beforeMicroBatch
+    }
+}
+
+/// Run `body` on each micro-batch in order, asking ``RerankExecutionOptions/beforeMicroBatch``
+/// first and splitting the micro-batch into single documents when it returns `true`.
+package func forEachRerankMicroBatch<Document>(
+    _ batches: [[Document]],
+    options: RerankExecutionOptions,
+    _ body: ([Document]) throws -> Void
+) async throws {
+    var pending = batches
+    while !pending.isEmpty {
+        try Task.checkCancellation()
+        var batch = pending.removeFirst()
+        if let beforeMicroBatch = options.beforeMicroBatch, await beforeMicroBatch(),
+            batch.count > 1
+        {
+            pending.insert(contentsOf: batch.dropFirst().map { [$0] }, at: 0)
+            batch = [batch[0]]
+        }
+        try body(batch)
     }
 }
 
@@ -956,8 +987,9 @@ extension ModelContainer {
             }
 
             var scores = [Double?](repeating: nil, count: documents.count)
-            for batch in causalMicroBatches(encoded, options: options) {
-                try Task.checkCancellation()
+            try await forEachRerankMicroBatch(
+                causalMicroBatches(encoded, options: options), options: options
+            ) { batch in
                 let batchScores = try scorer.score(batch: batch, model: context.model)
                 for (document, score) in zip(batch, batchScores) {
                     scores[document.index] = score

@@ -319,6 +319,39 @@ struct RerankerTests {
         #expect(scores.allSatisfy { $0 >= 0 && $0 <= 1 })
     }
 
+    @Test func beforeMicroBatchSplitsIntoSinglesOnlyWhenItAsks() async throws {
+        let documents = ["a", "bbbb", "cc", "dddddd"]
+        func run(_ split: Bool?) async throws -> (scores: [Double], shapes: [[Int]], asked: Int) {
+            let model = TestEncoderRerankerModel(
+                configuration: .init(
+                    inputKind: .xlmRoberta,
+                    padTokenID: 1,
+                    maxInputTokens: 128,
+                    scorePolicy: .singleLogit(transform: .identity),
+                    scoreKind: .logit))
+            let counter = MicroBatchCounter()
+            var options = RerankExecutionOptions(maxBatchSize: 2, maxBatchTokens: 30)
+            if let split {
+                options.beforeMicroBatch = { await counter.ask(split) }
+            }
+            let scores = try await makeEmbedderContainer(model: model).rerankerScores(
+                query: "q", documents: documents, options: options)
+            return (scores, model.scoredShapes, await counter.asked)
+        }
+
+        let plain = try await run(nil)
+        let idle = try await run(false)
+        let busy = try await run(true)
+
+        #expect(idle.scores == plain.scores)
+        #expect(idle.shapes == plain.shapes)
+        #expect(idle.asked == plain.shapes.count)
+        #expect(busy.scores == plain.scores)
+        #expect(busy.shapes.count == documents.count)
+        #expect(busy.shapes.allSatisfy { $0[0] == 1 })
+        #expect(busy.asked == documents.count)
+    }
+
     @Test func encoderTokenBudgetTruncatesOversizedSingleton() async throws {
         let model = TestEncoderRerankerModel(
             configuration: .init(
@@ -658,6 +691,15 @@ struct RerankerTests {
         #expect(
             try qwen.architecture(
                 modelID: "lampo/private-model", allowUnverifiedModel: true) == .qwen3)
+    }
+}
+
+private actor MicroBatchCounter {
+    var asked = 0
+
+    func ask(_ split: Bool) -> Bool {
+        asked += 1
+        return split
     }
 }
 

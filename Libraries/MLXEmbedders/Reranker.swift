@@ -123,8 +123,9 @@ extension EmbedderModelContainer {
             }
 
             var scores = [Double?](repeating: nil, count: documents.count)
-            for batchDocuments in makeMicroBatches(encoded, options: options) {
-                try Task.checkCancellation()
+            try await forEachRerankMicroBatch(
+                makeMicroBatches(encoded, options: options), options: options
+            ) { batchDocuments in
                 let batch = try makeBatch(
                     batchDocuments, padTokenID: configuration.padTokenID)
                 let logits = try model.score(
