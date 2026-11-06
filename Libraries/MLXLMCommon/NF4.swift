@@ -171,6 +171,30 @@ open class NF4Linear: Linear {
             else { continue }
             updates.append((path, try NF4Linear(weight: weight, bias: weights[path + ".bias"], scales: scales)))
         }
-        model.update(modules: ModuleChildren.unflattened(updates))
+        place(updates, in: model)
+    }
+
+    public static func quantizeRest(
+        in model: Module, weights: [String: MLXArray],
+        quantization: (String) -> (groupSize: Int, bits: Int, mode: QuantizationMode)?
+    ) {
+        let updates = model.leafModules().flattened().compactMap { path, module -> (String, Module)? in
+            guard weights[path + ".scales"] != nil, !(module is NF4Linear), let tuple = quantization(path),
+                let quantized = quantizeSingle(layer: module, groupSize: tuple.groupSize, bits: tuple.bits, mode: tuple.mode)
+            else { return nil }
+            return (path, quantized)
+        }
+        place(updates, in: model)
+    }
+
+    static func place(_ updates: [(String, Module)], in model: Module) {
+        let modules = Dictionary(model.namedModules(), uniquingKeysWith: { first, _ in first })
+        for (path, module) in updates {
+            guard let cut = path.lastIndex(of: "."), let parent = modules[String(path[..<cut])] else {
+                model.update(modules: ModuleChildren.unflattened([(path, module)]))
+                continue
+            }
+            parent.update(modules: ModuleChildren.unflattened([(String(path[path.index(after: cut)...]), module)]))
+        }
     }
 }

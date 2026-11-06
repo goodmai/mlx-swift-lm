@@ -386,10 +386,10 @@ public func loadWeights(
 
     if (quantization ?? perLayerQuantization?.quantization)?.quantMethod == NF4.method {
         try NF4Linear.install(in: model, weights: weights)
-    }
-
-    // quantize if needed
-    if quantization != nil || perLayerQuantization != nil {
+        NF4Linear.quantizeRest(in: model, weights: weights) { path in
+            perLayerQuantization.map { $0.quantization(layer: path)?.asTuple } ?? quantization?.asTuple
+        }
+    } else if quantization != nil || perLayerQuantization != nil {
         quantize(model: model) { path, module in
             if weights["\(path).scales"] != nil, !(module is NF4Linear) {
                 if let perLayerQuantization {
