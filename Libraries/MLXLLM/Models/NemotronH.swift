@@ -879,7 +879,6 @@ public struct NemotronHConfiguration: Codable, Sendable {
         case nSharedExperts = "n_shared_experts"
         case numExpertsPerTok = "num_experts_per_tok"
         case hybridOverridePattern = "hybrid_override_pattern"
-        case layersBlockType = "layers_block_type"
         case layerNormEpsilon = "layer_norm_epsilon"
         case mlpBias = "mlp_bias"
         case useBias = "use_bias"
@@ -895,8 +894,13 @@ public struct NemotronHConfiguration: Codable, Sendable {
         case timeStepLimitMax = "time_step_limit_max"
     }
 
+    private enum AlternateKeys: String, CodingKey {
+        case layersBlockType = "layers_block_type"
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let alternate = try decoder.container(keyedBy: AlternateKeys.self)
 
         modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "nemotron_h"
         vocabSize = try container.decode(Int.self, forKey: .vocabSize)
@@ -941,7 +945,7 @@ public struct NemotronHConfiguration: Codable, Sendable {
             [String].self, forKey: .hybridOverridePattern)
         {
             hybridOverridePattern = patternArray.joined()
-        } else if let blockTypes = try? container.decode(
+        } else if let blockTypes = try? alternate.decode(
             [String].self, forKey: .layersBlockType)
         {
             hybridOverridePattern = try blockTypes.map { block in
@@ -952,7 +956,7 @@ public struct NemotronHConfiguration: Codable, Sendable {
                 case "moe": return "E"
                 default:
                     throw DecodingError.dataCorruptedError(
-                        forKey: .layersBlockType, in: container,
+                        forKey: .layersBlockType, in: alternate,
                         debugDescription: "Unknown NemotronH block type: \(block)")
                 }
             }.joined()
