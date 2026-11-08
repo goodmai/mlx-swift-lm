@@ -673,11 +673,8 @@ private class NemotronHBackbone: Module {
         var hidden = inputEmbeddings ?? embeddings(inputs)
 
         let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode = {
-            guard let cacheIdx = firstAttentionCacheIndex,
-                let cache = cache,
-                cacheIdx < cache.count
-            else { return .none }
-            return createAttentionMask(h: hidden, cache: cache[cacheIdx])
+            guard let cacheIdx = firstAttentionCacheIndex else { return .none }
+            return createAttentionMask(h: hidden, cache: cache.flatMap { cacheIdx < $0.count ? $0[cacheIdx] : nil })
         }()
 
         let ssmMask: MLXArray? = {
