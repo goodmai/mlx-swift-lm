@@ -72,6 +72,7 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
     public let requiresPromptPrefill = true
     public let requiresGreedySampling = true
     private let preconvertedNorms: Bool
+    public private(set) var draftHead: Linear?
 
     @ModuleInfo(key: "mtp") var mtp: Qwen35MTPPredictor
 
@@ -249,7 +250,7 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
         )
     }
 
-    private func targetEmbeddingAndHead(_ target: any LanguageModel) -> (Embedding, Linear?) {
+    private func targetHead(_ target: any LanguageModel) -> (Embedding, Linear?) {
         if let model = target as? Qwen35Model {
             return (model.languageModel.model.embedTokens, model.languageModel.lmHead)
         }
@@ -258,5 +259,36 @@ public final class Qwen35MTPDraftModel: Module, StatefulMTPDrafterModel {
         }
         fatalError(
             "Qwen35MTPDraftModel requires a Qwen35 target, got \(type(of: target))")
+    }
+
+    private func targetEmbeddingAndHead(_ target: any LanguageModel) -> (Embedding, Linear?) {
+        let (embedding, head) = targetHead(target)
+        return (embedding, draftHead ?? head)
+    }
+
+    @discardableResult
+    public func useDraftHead(of target: any LanguageModel, bits: Int = 4, groupSize: Int = 64) -> Bool {
+        let (embedding, head) = targetHead(target)
+        let dense: MLXArray
+        if let quantized = head as? QuantizedLinear {
+            guard quantized.bits > bits else { return false }
+            dense = dequantized(
+                quantized.weight, scales: quantized.scales, biases: quantized.biases, groupSize: quantized.groupSize,
+                bits: quantized.bits, mode: quantized.mode)
+        } else if let head {
+            dense = head.weight
+        } else if let quantized = embedding as? QuantizedEmbedding {
+            guard quantized.bits > bits else { return false }
+            dense = dequantized(
+                quantized.weight, scales: quantized.scales, biases: quantized.biases, groupSize: quantized.groupSize,
+                bits: quantized.bits, mode: quantized.mode)
+        } else {
+            dense = embedding.weight
+        }
+        guard dense.dim(-1) % groupSize == 0 else { return false }
+        let copy = QuantizedLinear(weight: dense, bias: head?.bias, groupSize: groupSize, bits: bits)
+        eval(copy)
+        draftHead = copy
+        return true
     }
 }
