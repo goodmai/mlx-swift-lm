@@ -384,22 +384,9 @@ public func loadWeights(
     // per-model cleanup (models can inspect metadata to customize behavior)
     weights = model.sanitize(weights: weights, metadata: metadata)
 
-    if (quantization ?? perLayerQuantization?.quantization)?.quantMethod == NF4.method {
-        try NF4Linear.install(in: model, weights: weights)
-        NF4Linear.quantizeRest(in: model, weights: weights) { path in
-            perLayerQuantization.map { $0.quantization(layer: path)?.asTuple } ?? quantization?.asTuple
-        }
-    } else if quantization != nil || perLayerQuantization != nil {
-        quantize(model: model) { path, module in
-            if weights["\(path).scales"] != nil, !(module is NF4Linear) {
-                if let perLayerQuantization {
-                    return perLayerQuantization.quantization(layer: path)?.asTuple
-                } else {
-                    return quantization?.asTuple
-                }
-            } else {
-                return nil
-            }
+    if quantization != nil || perLayerQuantization != nil {
+        quantize(model: model) { path, _ in
+            layerQuantization(of: path, weights: weights, quantization: quantization, perLayerQuantization: perLayerQuantization)
         }
     }
 
@@ -439,4 +426,18 @@ public func loadWeights(
                 })
         }
     }
+}
+
+public func layerQuantization(
+    of path: String, weights: [String: MLXArray], quantization: BaseConfiguration.Quantization?,
+    perLayerQuantization: BaseConfiguration.PerLayerQuantization?
+) -> (groupSize: Int, bits: Int, mode: QuantizationMode)? {
+    guard let scales = weights["\(path).scales"], let weight = weights["\(path).weight"],
+        let (groupSize, bits, mode) = perLayerQuantization.map({ $0.quantization(layer: path)?.asTuple }) ?? quantization?.asTuple
+    else { return nil }
+    let nf4 = (quantization ?? perLayerQuantization?.quantization).map { $0.mode == .nf4 || $0.quantMethod == "nf4" } ?? false
+    guard nf4 else { return (groupSize, bits, mode) }
+    let affine = weights["\(path).biases"] != nil
+    let packedBits = affine ? bits : 4
+    return (weight.dim(-1) * (32 / packedBits) / max(1, scales.dim(-1)), packedBits, affine ? .affine : .nf4)
 }

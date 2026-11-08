@@ -85,8 +85,8 @@ final class CompiledTraceTests: XCTestCase {
     /// the capture at build time. A failure here means MLX changed its capture
     /// rules and `CompiledTrace` can be revisited.
     func testPlainCompileFreezesCapturedWeights() {
-        let layer = ScaleLayer(2)
-        let captured = MLX.compile { [unowned layer] (x: MLXArray) in layer.forward(x) }
+        nonisolated(unsafe) let layer = ScaleLayer(2)
+        let captured = MLX.compile { (x: MLXArray) in layer.forward(x) }
 
         XCTAssertEqual(value(captured(MLXArray([Float(1)]))), 2)
 
