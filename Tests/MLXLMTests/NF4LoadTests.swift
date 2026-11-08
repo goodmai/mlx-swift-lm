@@ -67,6 +67,16 @@ struct NF4LoadTests {
         #expect(Self.relativeError(out, cpu) < 1e-5)
     }
 
+    @Test("In an nf4 checkpoint a 6-bit affine layer keeps group 64 from its shapes, where 32 / 6 rounded down would give 60")
+    func sixBitAffine() throws {
+        let (wq, scales, biases) = quantized(MLXRandom.normal([16, 2048], key: MLXRandom.key(5)), groupSize: 64, bits: 6)
+        let weights = ["embed.weight": wq, "embed.scales": scales, "embed.biases": try #require(biases)]
+        var config = BaseConfiguration.PerLayerQuantization(quantization: nil, perLayerQuantization: ["embed": .quantize(.init(groupSize: 64, bits: 6))])
+        config.quantization = try JSONDecoder().decode(BaseConfiguration.Quantization.self, from: Data(#"{"group_size": 32, "bits": 4, "mode": "nf4"}"#.utf8))
+        let tuple = layerQuantization(of: "embed", weights: weights, quantization: nil, perLayerQuantization: config)
+        #expect(tuple?.groupSize == 64 && tuple?.bits == 6 && tuple?.mode == .affine)
+    }
+
     @Test("An affine checkpoint keeps its configured mode and group")
     func affine() {
         let weights = ["proj.weight": MLXArray.zeros([16, 8], dtype: .uint32), "proj.scales": MLXArray.zeros([16, 1]), "proj.biases": MLXArray.zeros([16, 1])]

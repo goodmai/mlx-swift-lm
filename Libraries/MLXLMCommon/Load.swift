@@ -439,5 +439,5 @@ public func layerQuantization(
     guard nf4 else { return (groupSize, bits, mode) }
     let affine = weights["\(path).biases"] != nil
     let packedBits = affine ? bits : 4
-    return (weight.dim(-1) * (32 / packedBits) / max(1, scales.dim(-1)), packedBits, affine ? .affine : .nf4)
+    return (weight.dim(-1) * 32 / (packedBits * max(1, scales.dim(-1))), packedBits, affine ? .affine : .nf4)
 }
