@@ -410,11 +410,8 @@ public class LFM2MoEModelInner: Module {
         var hidden = inputEmbeddings ?? embedTokens(inputs)
 
         let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode = {
-            guard let index = firstAttentionIndex,
-                let cache,
-                index < cache.count
-            else { return .none }
-            return createAttentionMask(h: hidden, cache: cache[index])
+            guard let index = firstAttentionIndex else { return .none }
+            return createAttentionMask(h: hidden, cache: cache.flatMap { index < $0.count ? $0[index] : nil })
         }()
 
         let ssmMask: MLXArray? = {
