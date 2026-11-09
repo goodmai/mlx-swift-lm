@@ -12,11 +12,13 @@ public protocol ForwardProbe: AnyObject {
     /// ``wantsAttention(layer:)`` is true.
     func attentionWeights(layer: Int, _ weights: MLXArray)
     func wantsAttention(layer: Int) -> Bool
-    /// `[heads]` of 0/1, multiplied into the attention output per head before the output projection.
+    /// `[heads]` of 0/1, multiplied into the attention output per head before the output projection,
+    /// or `[L, heads]` for a per-position mask over the forward's `L` positions (batch 1).
     func headMask(layer: Int) -> MLXArray?
     /// MoE router logits before top-k.
     func routerLogits(layer: Int, _ logits: MLXArray)
-    /// `[experts]` of 0/1; masked experts get `-inf` router logits before top-k.
+    /// `[experts]` of 0/1; masked experts get `-inf` router logits before top-k. `[L, experts]`
+    /// masks per position over the forward's `L` positions (batch 1).
     func expertMask(layer: Int) -> MLXArray?
     /// Each head's attention output `[B, heads, L, headDim]` before the output projection,
     /// after ``headMask(layer:)``. Keeps fused attention on; the default ignores it.
@@ -67,8 +69,13 @@ extension ForwardProbe {
     /// result to ``headOutputs(layer:_:)``.
     package func maskedHeads(layer: Int, _ output: MLXArray) -> MLXArray {
         let masked =
-            headMask(layer: layer).map { output * $0.asType(output.dtype).reshaped(1, -1, 1, 1) }
-            ?? output
+            headMask(layer: layer).map { mask in
+                let perHead =
+                    mask.ndim == 2
+                    ? mask.transposed().expandedDimensions(axes: [0, 3])
+                    : mask.reshaped(1, -1, 1, 1)
+                return output * perHead.asType(output.dtype)
+            } ?? output
         headOutputs(layer: layer, masked)
         return masked
     }
