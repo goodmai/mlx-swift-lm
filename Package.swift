@@ -61,7 +61,7 @@ let package = Package(
         .default(enabledTraits: ["FoundationModelsIntegration"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/goodmai/mlx-swift", revision: "18d07604792358067af545d2013b679b303d5ea6"),
+        .package(url: "https://github.com/goodmai/mlx-swift", revision: "6df64251d74bddfa3b958eb99cebd6f817a9f3ae"),
         // 602.0.0 floor: swift.org publishes signed prebuilt swift-syntax artifacts only for
         // >= 602 tags on current toolchains; a 600.x/601.x resolution falls back to the full
         // source compile of swift-syntax.
