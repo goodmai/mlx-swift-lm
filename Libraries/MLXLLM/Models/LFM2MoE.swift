@@ -308,6 +308,7 @@ class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
         if args.routedScalingFactor != 1 {
             weights = weights * args.routedScalingFactor
         }
+        probe?.routerTopK(layer: layer, indices: indices, gates: weights)
         return (indices, weights)
     }
 

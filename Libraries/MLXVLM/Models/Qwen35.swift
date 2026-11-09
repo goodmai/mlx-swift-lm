@@ -753,6 +753,7 @@ public enum Qwen35Language {
 
             let (inds, scores) = moeRouterTopK(
                 gates, k: topK, normalize: normTopkProb)
+            probe?.routerTopK(layer: layer, indices: inds, gates: scores)
 
             let y = switchMLP(x, inds)
             let combined = weightedExpertSum(y, scores)

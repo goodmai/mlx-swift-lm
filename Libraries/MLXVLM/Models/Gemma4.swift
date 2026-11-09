@@ -709,6 +709,7 @@ final class Gemma4TextRouter: Module {
         let (topKIndices, selected) = moeRouterTopK(scores, k: topKExperts, normalize: false)
         var topKWeights = MLX.softmax(selected, axis: -1)
         topKWeights = topKWeights * perExpertScale[topKIndices].asType(topKWeights.dtype)
+        probe?.routerTopK(layer: layer, indices: topKIndices, gates: topKWeights)
         return (topKIndices, topKWeights)
     }
 }

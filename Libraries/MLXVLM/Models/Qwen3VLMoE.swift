@@ -323,6 +323,7 @@ enum Qwen3VLMoELanguage {
             if normTopkProb {
                 scores = scores / scores.sum(axis: -1, keepDims: true)
             }
+            probe?.routerTopK(layer: layer, indices: indices, gates: scores)
 
             let expertOutput = switchMLP(x, indices)
             return (expertOutput * scores[.ellipsis, .newAxis]).sum(axis: -2)
