@@ -646,6 +646,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
 
         let (inds, scores) = moeRouterTopK(
             gates, k: topK, normalize: normTopkProb)
+        probe?.routerTopK(layer: layer, indices: inds, gates: scores)
 
         let tokenCount = x.size / x.dim(-1)
         let flatX = x.reshaped(tokenCount, x.dim(-1))

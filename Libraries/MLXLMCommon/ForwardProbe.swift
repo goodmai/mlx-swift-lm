@@ -18,6 +18,17 @@ public protocol ForwardProbe: AnyObject {
     func routerLogits(layer: Int, _ logits: MLXArray)
     /// `[experts]` of 0/1; masked experts get `-inf` router logits before top-k.
     func expertMask(layer: Int) -> MLXArray?
+    /// Each head's attention output `[B, heads, L, headDim]` before the output projection,
+    /// after ``headMask(layer:)``. Keeps fused attention on; the default ignores it.
+    func headOutputs(layer: Int, _ perHead: MLXArray)
+    /// The experts the router picked `[..., k]` and the gate weights `[..., k]` the layer
+    /// combines their outputs with, after any expert bias, group top-k and scaling.
+    func routerTopK(layer: Int, indices: MLXArray, gates: MLXArray)
+}
+
+extension ForwardProbe {
+    public func headOutputs(layer: Int, _ perHead: MLXArray) {}
+    public func routerTopK(layer: Int, indices: MLXArray, gates: MLXArray) {}
 }
 
 private struct BoundForwardProbe: @unchecked Sendable {
@@ -52,10 +63,14 @@ extension ForwardProbe {
         return MLX.where(mask .> 0, logits, -Float.infinity)
     }
 
-    /// Applies ``headMask(layer:)`` to an attention output `[B, heads, L, D]`.
+    /// Applies ``headMask(layer:)`` to an attention output `[B, heads, L, D]` and reports the
+    /// result to ``headOutputs(layer:_:)``.
     package func maskedHeads(layer: Int, _ output: MLXArray) -> MLXArray {
-        guard let mask = headMask(layer: layer) else { return output }
-        return output * mask.asType(output.dtype).reshaped(1, -1, 1, 1)
+        let masked =
+            headMask(layer: layer).map { output * $0.asType(output.dtype).reshaped(1, -1, 1, 1) }
+            ?? output
+        headOutputs(layer: layer, masked)
+        return masked
     }
 
     /// Attention as explicit softmax(QKᵀ·scale + mask)·V, reporting the weights.

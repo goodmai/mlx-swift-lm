@@ -157,6 +157,7 @@ class Qwen3MoESparseMoeBlock: Module, UnaryLayer {
             }
             scores = selected
         }
+        probe?.routerTopK(layer: layer, indices: inds, gates: scores)
 
         let y = switchMLP(x, inds)
         return weightedExpertSum(y, scores)

@@ -435,7 +435,7 @@ private class NemotronHMoEGate: Module {
     ) {
         var gates = MLX.matmul(x.asType(weight.dtype), weight.transposed())
         if let probe { gates = probe.maskedRouterLogits(layer: layer, gates) }
-        return groupExpertSelect(
+        let (indices, weights) = groupExpertSelect(
             gates: gates,
             eSCB: eSCB,
             topK: topK,
@@ -444,6 +444,8 @@ private class NemotronHMoEGate: Module {
             routedScalingFactor: routedScalingFactor,
             normTopkProb: normTopkProb
         )
+        probe?.routerTopK(layer: layer, indices: indices, gates: weights)
+        return (indices, weights)
     }
 }
 
