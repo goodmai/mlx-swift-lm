@@ -1015,15 +1015,9 @@ final class Gemma4TextDecoderLayer: Module {
         offset: RoPEOffset? = nil,
         probe: (any ForwardProbe)? = nil
     ) -> (MLXArray, Gemma4SharedKVState?, RoPEOffset) {
-        var residual = x
-        var h = inputLayerNorm(x)
-        let (attentionOutput, kvState, attentionOffset) = selfAttention(
-            h, mask: mask, cache: cache, sharedKV: sharedKV, offset: offset, probe: probe)
-        h = attentionOutput
-        h = postAttentionLayerNorm(h)
-        h = residual + h
-
-        residual = h
+        let (h, kvState, attentionOffset) = attend(
+            x, mask: mask, cache: cache, sharedKV: sharedKV, offset: offset, probe: probe)
+        let feedForward: MLXArray
         if enableMoE,
             let router,
             let experts,
@@ -1041,18 +1035,36 @@ final class Gemma4TextDecoderLayer: Module {
             sparse = experts(sparse, topKIndices: topKIndices, topKWeights: topKWeights)
             sparse = postFeedforwardLayerNorm2(sparse)
 
-            h = dense + sparse
+            feedForward = dense + sparse
         } else {
-            h = preFeedforwardLayerNorm(h)
-            h = mlp(h)
+            feedForward = mlp(preFeedforwardLayerNorm(h))
         }
-        h = postFeedforwardLayerNorm(h)
-        h = residual + h
+        return (finish(h, feedForward: feedForward, perLayerInput: perLayerInput), kvState, attentionOffset)
+    }
 
+    /// Attention and its residual: the input to the feed-forward half of the layer.
+    func attend(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?,
+        sharedKV: Gemma4SharedKVState?,
+        offset: RoPEOffset?,
+        probe: (any ForwardProbe)?
+    ) -> (MLXArray, Gemma4SharedKVState?, RoPEOffset) {
+        let h = inputLayerNorm(x)
+        let (attentionOutput, kvState, attentionOffset) = selfAttention(
+            h, mask: mask, cache: cache, sharedKV: sharedKV, offset: offset, probe: probe)
+        return (x + postAttentionLayerNorm(attentionOutput), kvState, attentionOffset)
+    }
+
+    /// The feed-forward residual, the per-layer input gate and the layer scalar, given the
+    /// feed-forward output computed from `attend`'s result.
+    func finish(_ residual: MLXArray, feedForward: MLXArray, perLayerInput: MLXArray?) -> MLXArray {
+        var h = residual + postFeedforwardLayerNorm(feedForward)
         if let perLayerInputGate, let perLayerProjection, let postPerLayerInputNorm,
             let perLayerInput
         {
-            residual = h
+            let residual = h
             var gated = perLayerInputGate(h)
             gated = geluApproximate(gated)
             gated = gated * perLayerInput
@@ -1060,8 +1072,7 @@ final class Gemma4TextDecoderLayer: Module {
             gated = postPerLayerInputNorm(gated)
             h = residual + gated
         }
-
-        return (h * layerScalar, kvState, attentionOffset)
+        return h * layerScalar
     }
 }
 
@@ -1372,6 +1383,50 @@ final class Gemma4TextBackbone: Module {
     }
 }
 
+extension Gemma4TextBackbone {
+    /// The text-only forward with every dense layer's feed-forward awaited from
+    /// `denseFeedForward`; MoE layers run their own. Matches `callAsFunction(inputs, cache:)`.
+    func hidden(
+        text inputs: MLXArray, cache: [KVCache?],
+        denseFeedForward: (Int, MLXArray) async throws -> MLXArray
+    ) async throws -> MLXArray {
+        let inputs = inputs.ndim == 1 ? inputs.expandedDimensions(axis: 0) : inputs
+        let embeddings = embedTokens(inputs)
+        let h0 = (embeddings * MLXArray(embedScale, dtype: .float32)).asType(embeddings.dtype)
+        let perLayerInputs = projectPerLayerInputs(
+            h0, perLayerInputs: config.hiddenSizePerLayerInput > 0 ? getPerLayerInputs(inputs) : nil)
+        let fullMask = createAttentionMask(
+            h: h0, cache: firstFullCacheIdx < cache.count ? cache[firstFullCacheIdx] : nil)
+        let slidingMask = createAttentionMask(
+            h: h0, cache: firstSlidingCacheIdx < cache.count ? cache[firstSlidingCacheIdx] : nil,
+            windowSize: config.slidingWindow)
+        var h = h0
+        var intermediates = [(kv: Gemma4SharedKVState?, offset: RoPEOffset?)](
+            repeating: (nil, nil), count: config.hiddenLayers)
+        for (idx, layer) in layers.enumerated() {
+            let sourceIdx = layerIdxToCacheIdx[idx]
+            let layerCache = idx < firstKVSharedLayerIdx && sourceIdx < cache.count ? cache[sourceIdx] : nil
+            let mask = layer.layerType == "full_attention" ? fullMask : slidingMask
+            let layerInput = perLayerInputs.map { $0[0..., 0..., idx, 0...] }
+            let sharedKV = idx >= firstKVSharedLayerIdx ? intermediates[sourceIdx].kv : nil
+            let offset = idx >= firstKVSharedLayerIdx ? intermediates[sourceIdx].offset : nil
+            if layer.enableMoE {
+                let (output, kvState, attentionOffset) = layer(
+                    h, mask: mask, cache: layerCache, perLayerInput: layerInput, sharedKV: sharedKV,
+                    offset: offset)
+                (h, intermediates[idx]) = (output, (kvState, attentionOffset))
+            } else {
+                let (attended, kvState, attentionOffset) = layer.attend(
+                    h, mask: mask, cache: layerCache, sharedKV: sharedKV, offset: offset, probe: nil)
+                let feedForward = try await denseFeedForward(idx, layer.preFeedforwardLayerNorm(attended))
+                h = layer.finish(attended, feedForward: feedForward, perLayerInput: layerInput)
+                intermediates[idx] = (kvState, attentionOffset)
+            }
+        }
+        return norm(h)
+    }
+}
+
 /// Module-internal — also consumed by `Gemma4Assistant.swift` (the MTP drafter
 /// reaches `embed_tokens` / `embed_scale` / `config.layer_types` through this).
 final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
@@ -1429,19 +1484,7 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
             tokenTypeIds: tokenTypeIds,
             emitDrafterState: emitDrafterState
         )
-        let logits: MLXArray
-        if let lmHead {
-            logits = lmHead(hidden)
-        } else {
-            logits = model.embedTokens.asLinear(hidden)
-        }
-        let softcappedLogits: MLXArray
-        if let finalLogitSoftcapping, finalLogitSoftcapping > 0 {
-            let scale = MLXArray(finalLogitSoftcapping)
-            softcappedLogits = gemma4LogitSoftcap(logits, scale)
-        } else {
-            softcappedLogits = logits
-        }
+        let softcappedLogits = logits(hidden)
 
         guard emitDrafterState, let sharedKV else {
             return LMOutput(logits: softcappedLogits)
@@ -1451,6 +1494,13 @@ final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         state[mtpSharedKVStatesKey] = sharedKV
         state[mtpSharedKVSourceIndicesKey] = sharedKVSources
         return LMOutput(logits: softcappedLogits, state: state)
+    }
+
+    /// The language-model head and the final logit softcap.
+    func logits(_ hidden: MLXArray) -> MLXArray {
+        let logits = lmHead.map { $0(hidden) } ?? model.embedTokens.asLinear(hidden)
+        guard let finalLogitSoftcapping, finalLogitSoftcapping > 0 else { return logits }
+        return gemma4LogitSoftcap(logits, MLXArray(finalLogitSoftcapping))
     }
 
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
@@ -3392,4 +3442,21 @@ extension Gemma4 {
 
 extension Gemma4Unified {
     public var toolCallFormat: ToolCallFormat? { .gemma4 }
+}
+
+extension Gemma4Unified: SplitFeedForwardPrefill {
+    public var denseFeedForwardLayers: [Int] {
+        languageModel.model.layers.indices.filter { !languageModel.model.layers[$0].enableMoE }
+    }
+
+    public func feedForwardPath(layer: Int) -> String { "language_model.model.layers.\(layer).mlp" }
+
+    public func prefill(
+        text tokens: MLXArray, cache: [any KVCache],
+        denseFeedForward: (Int, MLXArray) async throws -> MLXArray
+    ) async throws -> MLXArray {
+        let hidden = try await languageModel.model.hidden(
+            text: tokens, cache: cache.map { $0 as KVCache? }, denseFeedForward: denseFeedForward)
+        return languageModel.logits(hidden)
+    }
 }
