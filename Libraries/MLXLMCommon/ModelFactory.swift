@@ -80,6 +80,9 @@ public struct ModelContext {
     public var tokenizer: Tokenizer
     public var mtpDrafter: (any MTPDrafterModel)?
     public var batch: AnyObject?
+    /// State a client keeps with the model for a prefill that splits the feed-forward
+    /// (see ``SplitFeedForwardPrefill``), owned like the model itself.
+    public var feedForwardSplit: AnyObject?
     /// Bound around ``ModelContainer/performEvaluating(nonSendable:_:)``; see ``ForwardProbe``.
     public var probe: (any ForwardProbe)?
 
