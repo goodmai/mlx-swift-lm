@@ -110,6 +110,13 @@ public final class CompiledTrace<Owner: Module>: CompiledTraceInvalidating {
     private func compiled(_ owner: Owner) -> ([MLXArray]) -> [MLXArray] {
         let body = self.body
 
+        // A module that reads values back to the host cannot live in a trace,
+        // so a tree holding one runs the same body eagerly.
+        let modules = [owner] + state(owner)
+        if modules.contains(where: { $0.namedModules().contains { $0.1 is UntracedModule } }) {
+            return { [unowned owner] arguments in body(owner, arguments) }
+        }
+
         // A snapshot is enough: `update(parameters:)`, the path optimizers and
         // adapter weights take, writes through these same MLXArray objects.
         // Replacing modules makes new ones, which is what
@@ -125,6 +132,11 @@ public final class CompiledTrace<Owner: Module>: CompiledTraceInvalidating {
         }
     }
 }
+
+/// A module whose forward reads values back to the host, such as one that loads
+/// weights for the experts a router picked. A ``CompiledTrace`` over a tree that
+/// holds one runs its body eagerly instead of compiling it.
+public protocol UntracedModule: AnyObject {}
 
 /// Something `Module.invalidateCompiledTraces()` can reset: a ``CompiledTrace``
 /// or a container of them.
