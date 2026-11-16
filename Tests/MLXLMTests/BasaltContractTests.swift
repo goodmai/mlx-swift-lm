@@ -127,31 +127,31 @@ struct BasaltContractTests {
         #expect(Self.acquiredElsewhere(lock, within: .seconds(5)))
     }
 
-    @Test func `mtpDrafter and batch slots survive update and perform`() async {
+    @Test func `userInfo entries survive update and perform`() async {
         let container = ModelContainer(context: Self.tinyContext())
-        let empty = await container.perform { $0.mtpDrafter == nil && $0.batch == nil }
+        let empty = await container.perform { $0.userInfo.isEmpty }
         #expect(empty)
 
         await container.update {
-            $0.mtpDrafter = StubDrafter()
-            if $0.batch == nil { $0.batch = BatchState() }
+            $0.userInfo["drafter"] = StubDrafter()
+            if $0.userInfo["batch"] == nil { $0.userInfo["batch"] = BatchState() }
         }
-        let drafter = await container.perform { $0.mtpDrafter.map { ObjectIdentifier($0) } }
-        let token = await container.perform { ($0.batch as? BatchState)?.token }
+        let drafter = await container.perform { ($0.userInfo["drafter"] as? any MTPDrafterModel).map { ObjectIdentifier($0) } }
+        let token = await container.perform { ($0.userInfo["batch"] as? BatchState)?.token }
         #expect(drafter != nil)
         #expect(token != nil)
 
-        await container.update { if $0.batch == nil { $0.batch = BatchState() } }
+        await container.update { if $0.userInfo["batch"] == nil { $0.userInfo["batch"] = BatchState() } }
         await container.update { _ in }
         let seen = await container.performSending(nonSendable: ()) { context, _ in
             (
-                context.mtpDrafter.map { ObjectIdentifier($0) },
-                (context.batch as? BatchState)?.token
+                (context.userInfo["drafter"] as? any MTPDrafterModel).map { ObjectIdentifier($0) },
+                (context.userInfo["batch"] as? BatchState)?.token
             )
         }
         #expect(seen.0 == drafter)
         #expect(seen.1 === token)
-        let after = await container.perform { ($0.batch as? BatchState)?.token }
+        let after = await container.perform { ($0.userInfo["batch"] as? BatchState)?.token }
         #expect(after === token)
     }
 

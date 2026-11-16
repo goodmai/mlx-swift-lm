@@ -78,8 +78,7 @@ public struct ModelContext {
     public var model: any LanguageModel
     public var processor: any UserInputProcessor
     public var tokenizer: Tokenizer
-    public var mtpDrafter: (any MTPDrafterModel)?
-    public var batch: AnyObject?
+    public var userInfo: [String: Any] = [:]
     /// Bound around ``ModelContainer/performEvaluating(nonSendable:_:)``; see ``ForwardProbe``.
     public var probe: (any ForwardProbe)?
 
