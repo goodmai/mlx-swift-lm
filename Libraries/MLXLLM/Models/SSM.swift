@@ -266,8 +266,11 @@ public func ssmUpdate(
 ) -> (MLXArray, MLXArray) {
     let seqLen = hiddenStates.dim(1)
 
+    // The kernel covers the state dimension in chunks of 32 lanes; any other size
+    // would leave the new state unwritten, so it takes the scan path instead.
     if seqLen == 1,
         let state = state,
+        B.dim(-1) % 32 == 0,
         SSMKernelManager.shared.ssmKernel != nil
     {
         return ssmUpdateKernel(
