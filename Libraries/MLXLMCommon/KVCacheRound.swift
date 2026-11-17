@@ -211,14 +211,14 @@ enum KVCacheRoundStrategyFactory {
 /// Deliberately has no `commit` of its own. Committing means advancing the model-wide
 /// processed-token timeline by exactly the retained count, and that timeline lives on
 /// ``KVCacheStorage`` — so commit does too, and the two cannot be separated or reordered.
-package final class KVCacheRound {
+public final class KVCacheRound {
     let strategies: [any KVCacheRoundStrategy]
 
     /// Positionally matches the storage's live array.
-    package let caches: [KVCache]
+    public let caches: [KVCache]
 
     /// The width the round was opened for. Leaves were admitted on the promise of absorbing it.
-    package let maximumPositions: Int
+    public let maximumPositions: Int
 
     init(strategies: [any KVCacheRoundStrategy], maximumPositions: Int) {
         self.strategies = strategies
@@ -239,14 +239,14 @@ package final class KVCacheRound {
 }
 
 /// What a commit retained, and what the leaves can still describe afterwards.
-package struct KVCacheRoundCommit {
+public struct KVCacheRoundCommit {
     /// Positions kept. The timeline advanced by exactly this much.
-    package let committedPositions: Int
+    public let committedPositions: Int
 
     /// Positions written and then dropped — the rejected tail.
-    package let discardedPositions: Int
+    public let discardedPositions: Int
 
     /// Per leaf, how much of the emitted sequence it still describes: the whole stream for a
     /// global layer, the trailing window for a sliding one.
-    package let emittedLengths: [Int]
+    public let emittedLengths: [Int]
 }
