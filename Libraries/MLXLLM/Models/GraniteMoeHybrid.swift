@@ -472,11 +472,8 @@ public class GraniteMoeHybridModelInner: Module {
         var hidden = embedTokens(inputs) * embeddingMultiplier
 
         let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode = {
-            guard let index = firstAttentionIndex,
-                let cache = cache,
-                index < cache.count
-            else { return .none }
-            return createAttentionMask(h: hidden, cache: cache[index])
+            guard let index = firstAttentionIndex else { return .none }
+            return createAttentionMask(h: hidden, cache: cache.flatMap { index < $0.count ? $0[index] : nil })
         }()
 
         let ssmMask = createSSMMask(

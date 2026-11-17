@@ -477,10 +477,9 @@ public class LFM2MoEModelInner: Module {
         let attentionMask =
             attentionMask
             ?? {
-                guard let firstAttentionIndex, let cache, firstAttentionIndex < cache.count else {
-                    return createAttentionMask(h: hidden, cache: nil, windowSize: nil)
-                }
-                return createAttentionMask(h: hidden, cache: cache[firstAttentionIndex])
+                guard let firstAttentionIndex else { return .none }
+                return createAttentionMask(
+                    h: hidden, cache: cache.flatMap { firstAttentionIndex < $0.count ? $0[firstAttentionIndex] : nil })
             }()
 
         let ssmMask =

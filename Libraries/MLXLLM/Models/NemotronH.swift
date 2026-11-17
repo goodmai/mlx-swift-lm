@@ -665,16 +665,17 @@ private class NemotronHBackbone: Module {
         super.init()
     }
 
-    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
-        var hidden = embeddings(inputs)
+    func callAsFunction(
+        _ inputs: MLXArray? = nil, cache: [KVCache]? = nil, inputEmbeddings: MLXArray? = nil
+    ) -> MLXArray {
+        guard var hidden = inputEmbeddings ?? inputs.map({ embeddings($0) }) else {
+            preconditionFailure("NemotronHBackbone requires inputs or inputEmbeddings")
+        }
 
         // Create attention mask using the first attention layer's cache
         let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode = {
-            guard let cacheIdx = firstAttentionCacheIndex,
-                let cache = cache,
-                cacheIdx < cache.count
-            else { return .none }
-            return createAttentionMask(h: hidden, cache: cache[cacheIdx])
+            guard let cacheIdx = firstAttentionCacheIndex else { return .none }
+            return createAttentionMask(h: hidden, cache: cache.flatMap { cacheIdx < $0.count ? $0[cacheIdx] : nil })
         }()
 
         // Create SSM mask using the first Mamba layer's cache
@@ -742,14 +743,24 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
         }
     }
 
-    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        var out = backbone(inputs, cache: cache)
+    public func embedTokens(_ tokenIds: MLXArray) -> MLXArray {
+        backbone.embeddings(tokenIds)
+    }
+
+    public func callAsFunction(
+        _ inputs: MLXArray, cache: [KVCache]?, inputEmbeddings: MLXArray? = nil
+    ) -> MLXArray {
+        var out = backbone(inputs, cache: cache, inputEmbeddings: inputEmbeddings)
         if let lmHead {
             out = lmHead(out)
         } else {
             out = backbone.embeddings.asLinear(out)
         }
         return out
+    }
+
+    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        callAsFunction(inputs, cache: cache, inputEmbeddings: nil)
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
