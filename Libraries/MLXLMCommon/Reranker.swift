@@ -94,7 +94,6 @@ package func forEachRerankMicroBatch<Document>(
 ) async throws {
     var pending = batches
     while !pending.isEmpty {
-        try Task.checkCancellation()
         var batch = pending.removeFirst()
         if let beforeMicroBatch = options.beforeMicroBatch, await beforeMicroBatch(),
             batch.count > 1
@@ -102,6 +101,7 @@ package func forEachRerankMicroBatch<Document>(
             pending.insert(contentsOf: batch.dropFirst().map { [$0] }, at: 0)
             batch = [batch[0]]
         }
+        try Task.checkCancellation()
         try body(batch)
     }
 }
