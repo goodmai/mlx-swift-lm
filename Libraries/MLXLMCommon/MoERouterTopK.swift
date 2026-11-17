@@ -148,7 +148,7 @@ func chainRouterTopK(
     _ gates: MLXArray, k: Int, normalize: Bool
 ) -> (indices: MLXArray, scores: MLXArray) {
     let kth = gates.dim(-1) - k
-    let inds = MLX.argPartition(gates, kth: kth, axis: -1)[.ellipsis, (kth)...]
+    let inds = MLX.stopGradient(MLX.argPartition(gates, kth: kth, axis: -1)[.ellipsis, (kth)...])
     var scores = MLX.takeAlong(gates, inds, axis: -1)
     if normalize {
         scores = scores / scores.sum(axis: -1, keepDims: true)
@@ -183,7 +183,7 @@ public func sigmoidBiasRouterTopK(
             order: .descending, normalizationFloor: true)
         return (out.indices, out.scores)
     }
-    let indices = argPartition(-selection, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+    let indices = stopGradient(argPartition(-selection, kth: k - 1, axis: -1)[.ellipsis, ..<k])
     var weights = takeAlong(routingWeights, indices, axis: -1)
     if normalize {
         weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-6)
