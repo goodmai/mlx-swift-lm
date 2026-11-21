@@ -313,6 +313,7 @@ private class Gemma4Attention: Module {
 
         let activePositionOffset = positionOffset ?? cache?.ropeOffset
         let kvState: Gemma4SharedKVState
+        var attendingCache: (KVCacheAttentionProtocol, MLXArray, MLXArray)?
 
         if let sharedKV {
             // KV-shared layers use pre-computed KV from an earlier layer.
@@ -341,7 +342,10 @@ private class Gemma4Attention: Module {
                 v = v.transposed(0, 2, 1, 3)
             }
 
-            if let quantizedCache = cache as? QuantizedKVCacheProtocol {
+            if let routed = cache as? KVCacheAttentionProtocol, routed.requiresAttentionThroughCache {
+                attendingCache = (routed, k, v)
+                kvState = .regular(keys: k, values: v)
+            } else if let quantizedCache = cache as? QuantizedKVCacheProtocol {
                 let (quantizedKeys, quantizedValues) = quantizedCache.updateQuantized(
                     keys: k, values: v)
                 kvState = .quantized(
@@ -376,11 +380,11 @@ private class Gemma4Attention: Module {
             case .regular(let keys, let values):
                 attentionWithCacheUpdate(
                     queries: queries,
-                    keys: keys,
-                    values: values,
-                    cache: nil,
+                    keys: attendingCache?.1 ?? keys,
+                    values: attendingCache?.2 ?? values,
+                    cache: attendingCache?.0,
                     scale: scale,
-                    mask: adjustedMask ?? .none,
+                    mask: attendingCache == nil ? (adjustedMask ?? .none) : (mask ?? .none),
                     probe: probe,
                     layer: layerIdx
                 )

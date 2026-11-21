@@ -857,6 +857,7 @@ final class Gemma4TextAttention: Module {
 
         let currentOffset: RoPEOffset
         let kvState: Gemma4SharedKVState?
+        var attendingCache: KVCacheAttentionProtocol?
 
         if let sharedKV {
             currentOffset = offset ?? .scalar(0)
@@ -881,7 +882,10 @@ final class Gemma4TextAttention: Module {
             keys = kNorm(keys).transposed(0, 2, 1, 3)
             values = vNorm(values).transposed(0, 2, 1, 3)
             keys = applyRotaryPosition(rope, to: keys, offset: currentOffset)
-            if let quantizedCache = cache as? QuantizedKVCacheProtocol {
+            if let routed = cache as? KVCacheAttentionProtocol, routed.requiresAttentionThroughCache {
+                attendingCache = routed
+                kvState = .regular(keys: keys, values: values)
+            } else if let quantizedCache = cache as? QuantizedKVCacheProtocol {
                 let (quantizedKeys, quantizedValues) = quantizedCache.updateQuantized(
                     keys: keys, values: values)
                 kvState = .quantized(
@@ -905,7 +909,7 @@ final class Gemma4TextAttention: Module {
         guard let kvState else {
             fatalError("Gemma4 attention expected a KV state")
         }
-        let localMask = gemma4AdjustAttentionMask(mask, keyLength: kvState.sequenceLength)
+        let localMask = attendingCache == nil ? gemma4AdjustAttentionMask(mask, keyLength: kvState.sequenceLength) : mask
 
         var output: MLXArray =
             switch kvState {
@@ -914,7 +918,7 @@ final class Gemma4TextAttention: Module {
                     queries: queries,
                     keys: keys,
                     values: values,
-                    cache: nil,
+                    cache: attendingCache,
                     scale: scale,
                     mask: localMask,
                     probe: probe,

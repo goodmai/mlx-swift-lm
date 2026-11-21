@@ -195,6 +195,15 @@ public protocol KVCacheAttentionProtocol: KVCache {
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray
+
+    /// True when a model that normally updates the cache and attends over the returned K/V
+    /// itself (Gemma 4) must hand both to `updateAndAttend` instead, because the cache stores
+    /// a layout that is not plain K/V.
+    var requiresAttentionThroughCache: Bool { get }
+}
+
+extension KVCacheAttentionProtocol {
+    public var requiresAttentionThroughCache: Bool { false }
 }
 
 /// Base cache implementation providing default behaviors
