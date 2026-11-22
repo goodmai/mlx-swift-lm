@@ -37,6 +37,7 @@ extension ToolCallFormat {
     /// are selected by the models that own them, and guessing them from text
     /// would reroute the whole response protocol rather than one payload shape.
     private static let signatures: [Signature] = [
+        Signature(.inkling, allOf: "<|content_invoke_tool_json|>"),
         Signature(.minimaxM2, allOf: "<minimax:tool_call>"),
         Signature(.gemma4, allOf: "<|tool_call>", "<tool_call|>"),
         Signature(.gemma, allOf: "<start_function_call>"),
@@ -70,6 +71,7 @@ extension ToolCallFormat {
         case "pythonic", "lfm2": self = .lfm2
         case "qwen3_coder", "qwen3_xml", "xml_function": self = .xmlFunction
         case "kimi_k2": self = .kimiK2
+        case "inkling", "inkling2": self = .inkling
         case "mistral": self = .mistral
         case "json_tools", "json": self = .json
         default: return nil
@@ -118,7 +120,7 @@ extension ToolCallFormat {
         switch self {
         case .qwen35:
             return templateFormat == .xmlFunction || templateFormat == .json
-        case .gptOSS, .atem:
+        case .gptOSS, .atem, .inkling:
             // These select complete token-stream protocols, not interchangeable
             // payload parsers. Incidental textual markers must not reroute them.
             return true
