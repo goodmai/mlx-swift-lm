@@ -400,16 +400,13 @@ final class Qwen3NextSparseMoeBlock: Module {
         var gates = gate(x)
         gates = MLX.softmax(gates, axis: -1, precise: true)
 
-        let k = topK
-        let kth = gates.dim(-1) - k
-        let inds = MLX.argPartition(gates, kth: kth, axis: -1)[.ellipsis, (kth)...]
-        var scores = MLX.takeAlong(gates, inds, axis: -1)
-        if normTopkProb {
-            scores = scores / scores.sum(axis: -1, keepDims: true)
-        }
+        let (inds, scores) = moeRouterTopK(gates, k: topK, normalize: normTopkProb)
 
-        let y = switchMLP(x, inds)
-        let combined = weightedExpertSum(y, scores)
+        let tokenCount = x.size / x.dim(-1)
+        let combined = switchMLP.callAndWeightedReduce(
+            x.reshaped(tokenCount, x.dim(-1)), inds.reshaped(tokenCount, topK),
+            weights: scores.reshaped(tokenCount, topK), fuseSortedReduction: true
+        ).reshaped(x.shape)
 
         var sharedY = sharedExpert(x)
         sharedY = sigmoid(sharedExpertGate(x)) * sharedY
