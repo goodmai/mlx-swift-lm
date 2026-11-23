@@ -82,6 +82,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// coherent drafts → lower acceptance, especially at higher blockSize.
     private var lastRoundAccepted: Int? = nil
     private var draftDepth = 1
+    private var depthPolicy: MTPDraftDepthPolicy?
     private var fullRounds = 0
 
     public var promptPrefillTime: TimeInterval = 0.0
@@ -146,7 +147,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let effectiveBlockSize = Swift.min(
             drafterBlockSize, Self.maximumBlockSize(for: mainCache))
         self.blockSize = effectiveBlockSize
-        if !drafter.adaptsDraftDepth { self.draftDepth = effectiveBlockSize - 1 }
+        if let cost = drafter.draftWidthCost, effectiveBlockSize > 1 {
+            self.depthPolicy = MTPDraftDepthPolicy(widthCost: cost, maximumDepth: effectiveBlockSize - 1)
+        }
 
         // Probe by opening a round at the width rounds will actually use and discarding it,
         // rather than duplicating the leaf classification as a predicate that could drift from
@@ -375,6 +378,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // A speculative round can emit up to `numDraft + 1` tokens: the
         // accepted draft prefix plus the verifier's correction/bonus token.
         // Keep the whole pending buffer within the remaining output budget.
+        if let depthPolicy { draftDepth = depthPolicy.depth(maximum: blockSize - 1) }
         let numDraft: Int
         if let maxTokens {
             let remaining = maxTokens - tokenCount
@@ -537,7 +541,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         acceptedCount += accepted
         lastRoundAccepted = accepted
         fullRounds = accepted == numDraft ? fullRounds + 1 : 0
-        if !drafter.adaptsDraftDepth {
+        if depthPolicy != nil {
+            depthPolicy?.record(drafted: numDraft, accepted: accepted)
             fullRounds = 0
         } else if accepted < numDraft {
             draftDepth = 1

@@ -44,10 +44,12 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// probability-ratio acceptance sampler is available.
     var requiresGreedySampling: Bool { get }
 
-    /// Whether the iterator starts each stream at one draft and widens only after full rounds.
-    /// A drafter that proposes its whole block in one call, as block drafters do, sets this to
-    /// `false` and is always asked for `blockSize - 1` drafts.
-    var adaptsDraftDepth: Bool { get }
+    /// The extra cost of verifying one more draft, as a fraction of a single-token target step.
+    ///
+    /// `nil` keeps the iterator's chained rule: one draft, widened after full rounds. A drafter
+    /// that proposes its whole block in one call sets it, and each round then verifies the depth
+    /// with the most expected tokens per unit of cost (``MTPDraftDepthPolicy``).
+    var draftWidthCost: Double? { get }
 
     /// K-step drafting from a constant position.
     ///
@@ -160,7 +162,7 @@ extension MTPDrafterModel {
     public var requiresSharedTargetKV: Bool { true }
     public var requiresPromptPrefill: Bool { false }
     public var requiresGreedySampling: Bool { false }
-    public var adaptsDraftDepth: Bool { true }
+    public var draftWidthCost: Double? { nil }
 }
 
 /// Target-side capability for rewinding an in-place speculative verify pass.
