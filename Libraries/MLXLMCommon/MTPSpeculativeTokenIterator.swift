@@ -146,6 +146,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let effectiveBlockSize = Swift.min(
             drafterBlockSize, Self.maximumBlockSize(for: mainCache))
         self.blockSize = effectiveBlockSize
+        if !drafter.adaptsDraftDepth { self.draftDepth = effectiveBlockSize - 1 }
 
         // Probe by opening a round at the width rounds will actually use and discarding it,
         // rather than duplicating the leaf classification as a predicate that could drift from
@@ -536,7 +537,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         acceptedCount += accepted
         lastRoundAccepted = accepted
         fullRounds = accepted == numDraft ? fullRounds + 1 : 0
-        if accepted < numDraft {
+        if !drafter.adaptsDraftDepth {
+            fullRounds = 0
+        } else if accepted < numDraft {
             draftDepth = 1
         } else if fullRounds >= 4 {
             draftDepth = Swift.min(numDraft + 1, blockSize - 1)

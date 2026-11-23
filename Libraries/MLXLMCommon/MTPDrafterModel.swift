@@ -44,6 +44,11 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// probability-ratio acceptance sampler is available.
     var requiresGreedySampling: Bool { get }
 
+    /// Whether the iterator starts each stream at one draft and widens only after full rounds.
+    /// A drafter that proposes its whole block in one call, as block drafters do, sets this to
+    /// `false` and is always asked for `blockSize - 1` drafts.
+    var adaptsDraftDepth: Bool { get }
+
     /// K-step drafting from a constant position.
     ///
     /// Returns the proposed tokens as a `[B, blockSize - 1]` MLXArray. The
@@ -155,6 +160,7 @@ extension MTPDrafterModel {
     public var requiresSharedTargetKV: Bool { true }
     public var requiresPromptPrefill: Bool { false }
     public var requiresGreedySampling: Bool { false }
+    public var adaptsDraftDepth: Bool { true }
 }
 
 /// Target-side capability for rewinding an in-place speculative verify pass.
