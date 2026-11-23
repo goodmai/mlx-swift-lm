@@ -386,17 +386,50 @@ public func loadWeights(
 
     // quantize if needed
     if quantization != nil || perLayerQuantization != nil {
-        quantize(model: model) { path, module in
-            if weights["\(path).scales"] != nil {
+        var updates = [(String, Module)]()
+        for (path, module) in model.leafModules().flattened() {
+            guard weights["\(path).scales"] != nil else { continue }
+            let spec: (Int, Int, QuantizationMode)? =
                 if let perLayerQuantization {
-                    return perLayerQuantization.quantization(layer: path)?.asTuple
+                    perLayerQuantization.quantization(layer: path)?.asTuple
                 } else {
-                    return quantization?.asTuple
+                    quantization?.asTuple
                 }
-            } else {
-                return nil
+            guard let (groupSize, bits, mode) = spec else { continue }
+            let hasGlobalScale = weights["\(path).global_scale"] != nil
+            if hasGlobalScale && mode != .nvfp4 {
+                throw ModelFactoryError.invalidConfiguration(
+                    "global_scale on '\(path)' is only supported for nvfp4 mode, got '\(mode.rawValue)'"
+                )
+            }
+            if let switchLayer = module as? SwitchLinear, !(module is Quantized) {
+                let placeholder =
+                    hasGlobalScale
+                    ? MLXArray.ones([switchLayer.numExperts], dtype: .float32)
+                    : nil
+                updates.append(
+                    (
+                        path,
+                        QuantizedSwitchLinear(
+                            switchLayer, groupSize: groupSize, bits: bits, mode: mode,
+                            globalScale: placeholder)
+                    ))
+            } else if let linear = module as? Linear, !(module is Quantized), hasGlobalScale {
+                updates.append(
+                    (
+                        path,
+                        QuantizedLinear(
+                            weight: linear.weight, bias: linear.bias,
+                            groupSize: groupSize, bits: bits, mode: mode,
+                            globalScale: MLXArray(Float(1)))
+                    ))
+            } else if let quantized = quantizeSingle(
+                layer: module, groupSize: groupSize, bits: bits, mode: mode)
+            {
+                updates.append((path, quantized))
             }
         }
+        model.update(modules: ModuleChildren.unflattened(updates))
     }
 
     // apply the loaded weights
