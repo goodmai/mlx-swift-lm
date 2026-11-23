@@ -186,9 +186,13 @@ enum KVCacheRoundStrategyFactory {
     static func make(
         for leaf: KVCacheLeaf, slot: Int, maximumPositions: Int
     ) -> (any KVCacheRoundStrategy)? {
-        // Recurrent state has no rewindable position and no staged form, and deliberately does
-        // not participate in the shared timeline at all.
-        guard leaf.isAttentionCache else { return nil }
+        // Recurrent state has no staged form and does not participate in the shared timeline.
+        // It writes through only when its trim undoes the round's write exactly, as convolution
+        // states that keep their windows do.
+        guard leaf.isAttentionCache else {
+            return leaf.cache.isTrimmable(after: maximumPositions)
+                ? AppendOnlyRoundStrategy(slot: slot, live: leaf.cache) : nil
+        }
 
         switch leaf.kind {
         case .rotating(let rotating):
