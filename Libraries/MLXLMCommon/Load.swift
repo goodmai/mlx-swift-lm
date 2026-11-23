@@ -401,7 +401,17 @@ public func loadWeights(
 
     // apply the loaded weights
     let parameters = ModuleParameters.unflattened(weights)
-    try model.update(parameters: parameters, verify: [.all])
+    do {
+        try model.update(parameters: parameters, verify: [.all])
+    } catch {
+        if let ignored = perLayerQuantization?.ignoredKeys, !ignored.isEmpty {
+            let joined = ignored.joined(separator: ", ")
+            throw ModelFactoryError.invalidConfiguration(
+                "\(error) (config.json quantization keys ignored: \(joined))"
+            )
+        }
+        throw error
+    }
 
     // Build derived inference-only state and realize the model while the loader
     // still has exclusive access. Forward passes must remain read-only.
