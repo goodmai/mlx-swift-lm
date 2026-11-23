@@ -21,7 +21,7 @@ public struct MTPDraftDepthPolicy: Sendable {
 
     public init(
         widthCost: Double, maximumDepth: Int, decay: Double = 0.95, priorAcceptance: Double = 0.7,
-        priorWeight: Double = 2
+        priorWeight: Double = 1
     ) {
         precondition(widthCost > 0 && maximumDepth > 0 && (0 ..< 1).contains(decay))
         self.widthCost = widthCost
@@ -33,8 +33,10 @@ public struct MTPDraftDepthPolicy: Sendable {
     }
 
     /// The estimated chance that position `index` (0-based) is accepted given the ones before it.
+    /// A position with little evidence leans on the estimate of the one before it.
     public func acceptance(at index: Int) -> Double {
-        (accepted[index] + priorAcceptance * priorWeight) / (reached[index] + priorWeight)
+        let prior = index == 0 ? priorAcceptance : acceptance(at: index - 1)
+        return (accepted[index] + prior * priorWeight) / (reached[index] + priorWeight)
     }
 
     /// The depth, from 1 to `maximum`, with the most expected tokens per unit of verify cost.
