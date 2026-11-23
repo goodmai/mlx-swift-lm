@@ -441,20 +441,48 @@ open class SwitchLinear: Module, Quantizable {
 open class QuantizedSwitchLinear: SwitchLinear, Quantized {
     @ModuleInfo(key: "scales") var scales: MLXArray
     @ModuleInfo(key: "biases") var biases: MLXArray?
+    @ParameterInfo(key: "global_scale") public var globalScale: MLXArray?
 
     public let groupSize: Int
     public let bits: Int
     public let mode: QuantizationMode
 
     public init(
-        _ other: SwitchLinear, groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode = .affine
+        _ other: SwitchLinear, groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode = .affine,
+        globalScale: MLXArray? = nil
     ) {
+        precondition(
+            globalScale == nil || mode == .nvfp4,
+            "QuantizedSwitchLinear global_scale is only supported for nvfp4 mode")
         self.groupSize = groupSize
         self.bits = bits
         self.mode = mode
+        self._globalScale.wrappedValue = globalScale
 
-        let (quantizedWeight, scales, biases) = MLX.quantized(
-            other.weight, groupSize: groupSize, bits: bits, mode: mode)
+        let quantizedWeight: MLXArray
+        let scales: MLXArray
+        let biases: MLXArray?
+        if let globalScale, mode == .nvfp4, globalScale.ndim == 1,
+            globalScale.dim(0) == other.numExperts
+        {
+            var weightsList = [MLXArray]()
+            var scalesList = [MLXArray]()
+            weightsList.reserveCapacity(other.numExperts)
+            scalesList.reserveCapacity(other.numExperts)
+            for expert in 0 ..< other.numExperts {
+                let (w, s, _) = MLX.quantized(
+                    other.weight[expert], groupSize: groupSize, bits: bits, mode: mode,
+                    globalScale: globalScale[expert])
+                weightsList.append(w)
+                scalesList.append(s)
+            }
+            quantizedWeight = MLX.stacked(weightsList, axis: 0)
+            scales = MLX.stacked(scalesList, axis: 0)
+            biases = nil
+        } else {
+            (quantizedWeight, scales, biases) = MLX.quantized(
+                other.weight, groupSize: groupSize, bits: bits, mode: mode)
+        }
 
         self._scales.wrappedValue = scales
         self._biases.wrappedValue = biases
@@ -462,6 +490,29 @@ open class QuantizedSwitchLinear: SwitchLinear, Quantized {
         super.init(
             inputDims: other.inputDims, outputDims: other.outputDims, numExperts: other.numExperts,
             weight: quantizedWeight, bias: other.bias)
+
+        self.freeze()
+    }
+
+    public init(
+        weight: MLXArray, scales: MLXArray, biases: MLXArray? = nil, bias: MLXArray? = nil,
+        inputDims: Int, outputDims: Int, numExperts: Int,
+        groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode = .affine,
+        globalScale: MLXArray? = nil
+    ) {
+        precondition(
+            globalScale == nil || mode == .nvfp4,
+            "QuantizedSwitchLinear global_scale is only supported for nvfp4 mode")
+        self.groupSize = groupSize
+        self.bits = bits
+        self.mode = mode
+        self._scales.wrappedValue = scales
+        self._biases.wrappedValue = biases
+        self._globalScale.wrappedValue = globalScale
+
+        super.init(
+            inputDims: inputDims, outputDims: outputDims, numExperts: numExperts,
+            weight: weight, bias: bias)
 
         self.freeze()
     }
@@ -479,6 +530,7 @@ open class QuantizedSwitchLinear: SwitchLinear, Quantized {
             groupSize: self.groupSize,
             bits: self.bits,
             mode: mode,
+            globalScale: self.globalScale,
             sortedIndices: sortedIndices
         )
 
