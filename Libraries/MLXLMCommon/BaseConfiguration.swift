@@ -3,6 +3,8 @@
 import Foundation
 import MLX
 
+private let baseConfigLogger = Logger(subsystem: "mlx-swift-lm", category: "BaseConfiguration")
+
 /// The fundamental configuration for any MLX-based model.
 ///
 /// `BaseConfiguration` provides the metadata necessary to identify the model architecture
@@ -25,9 +27,42 @@ public struct BaseConfiguration: Codable, Sendable {
         /// - Parameters:
         ///   - groupSize: The number of weights that share the same scale and bias.
         ///   - bits: The bit-depth of the quantized weights (e.g., 4 or 8).
-        public init(groupSize: Int, bits: Int) {
+        ///   - mode: The quantization mode (defaults to `.affine`).
+        public init(groupSize: Int, bits: Int, mode: QuantizationMode = .affine) {
             self.groupSize = groupSize
             self.bits = bits
+            self._mode = mode == .affine ? nil : mode
+        }
+
+        /// Default group size for a quantization mode when `group_size` is omitted from `config.json`.
+        public static func defaultGroupSize(for mode: QuantizationMode) -> Int {
+            switch mode {
+            case .affine: 64
+            case .mxfp4, .mxfp8: 32
+            case .nvfp4: 16
+            }
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.bits = try container.decode(Int.self, forKey: .bits)
+            if let rawMode = try container.decodeIfPresent(String.self, forKey: ._mode) {
+                guard let parsed = QuantizationMode(rawValue: rawMode) else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: ._mode, in: container,
+                        debugDescription: "Unsupported quantization mode '\(rawMode)'")
+                }
+                self._mode = parsed
+            } else {
+                self._mode = nil
+            }
+            self.groupSize =
+                try container.decodeIfPresent(Int.self, forKey: .groupSize)
+                ?? Self.defaultGroupSize(for: self._mode ?? .affine)
+        }
+
+        public static func == (lhs: Quantization, rhs: Quantization) -> Bool {
+            lhs.groupSize == rhs.groupSize && lhs.bits == rhs.bits && lhs.mode == rhs.mode
         }
 
         /// The size of the quantization group.
@@ -75,12 +110,18 @@ public struct BaseConfiguration: Codable, Sendable {
         /// A dictionary mapping layer paths (e.g., "model.embed_tokens") to their quantization options.
         public var perLayerQuantization: [String: QuantizationOption]
 
+        /// Sorted list of keys in the quantization block that were not valid per-layer instructions
+        /// and were ignored during decoding.
+        public var ignoredKeys: [String] = []
+
         public init(
             quantization: BaseConfiguration.Quantization? = nil,
-            perLayerQuantization: [String: BaseConfiguration.QuantizationOption]
+            perLayerQuantization: [String: BaseConfiguration.QuantizationOption],
+            ignoredKeys: [String] = []
         ) {
             self.quantization = quantization
             self.perLayerQuantization = perLayerQuantization
+            self.ignoredKeys = ignoredKeys
         }
 
         /// Resolves the quantization parameters for a specific layer.
@@ -142,7 +183,9 @@ public struct BaseConfiguration: Codable, Sendable {
 
             // and the interleaved per-layer values
             var perLayerQuantization = [String: QuantizationOption]()
+            var ignoredKeys = [String]()
             let container = try decoder.container(keyedBy: _DictionaryCodingKey.self)
+            let bitsKey = _DictionaryCodingKey(stringValue: Quantization.CodingKeys.bits.rawValue)
             for key in container.allKeys {
                 switch key.stringValue {
                 case Quantization.CodingKeys.groupSize.rawValue: continue
@@ -154,20 +197,32 @@ public struct BaseConfiguration: Codable, Sendable {
                 case "quant_method", "linear_class", "quantization_mode": continue
 
                 default:
-                    // If the value is a boolean 'false', we treat it as .skip
+                    // A per-layer instruction is a Bool or a dict containing "bits".
+                    // Every other value (string, number, array, null, dict without "bits") is ignored.
                     if let f = try? container.decode(Bool.self, forKey: key) {
                         if !f {
                             perLayerQuantization[key.stringValue] = .skip
                         }
-                    } else {
-                        // Otherwise, try to decode a specific Quantization object for this layer
+                    } else if let nested = try? container.nestedContainer(
+                        keyedBy: _DictionaryCodingKey.self, forKey: key),
+                        nested.contains(bitsKey)
+                    {
                         perLayerQuantization[key.stringValue] = .quantize(
                             try container.decode(Quantization.self, forKey: key))
+                    } else {
+                        ignoredKeys.append(key.stringValue)
                     }
                 }
             }
+            ignoredKeys.sort()
+            if !ignoredKeys.isEmpty {
+                let joined = ignoredKeys.joined(separator: ", ")
+                baseConfigLogger.info("config.json quantization keys ignored: \(joined)")
+            }
             self.perLayerQuantization = PerLayerQuantization(
-                quantization: quantization, perLayerQuantization: perLayerQuantization)
+                quantization: quantization,
+                perLayerQuantization: perLayerQuantization,
+                ignoredKeys: ignoredKeys)
         }
 
         func encode(to encoder: any Encoder) throws {
@@ -221,7 +276,49 @@ public struct BaseConfiguration: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
         case quantizationContainer = "quantization"
+        case quantizationConfig = "quantization_config"
         case textConfiguration = "text_config"
         case eosTokenIds = "eos_token_id"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.modelType = try container.decode(String.self, forKey: .modelType)
+        self.textConfiguration = try container.decodeIfPresent(
+            TextConfiguration.self, forKey: .textConfiguration)
+        self.eosTokenIds = try container.decodeIfPresent(IntOrIntArray.self, forKey: .eosTokenIds)
+
+        if container.contains(.quantizationContainer),
+            !(try container.decodeNil(forKey: .quantizationContainer))
+        {
+            self.quantizationContainer = try container.decode(
+                QuantizationContainer.self, forKey: .quantizationContainer)
+        } else if container.contains(.quantizationConfig),
+            !(try container.decodeNil(forKey: .quantizationConfig)),
+            let nested = try? container.nestedContainer(
+                keyedBy: QuantizationContainer._DictionaryCodingKey.self,
+                forKey: .quantizationConfig)
+        {
+            let quantMethod = try? nested.decodeIfPresent(
+                String.self, forKey: .init(stringValue: "quant_method"))
+            let hasBits = nested.contains(
+                .init(stringValue: Quantization.CodingKeys.bits.rawValue))
+            if (quantMethod == nil || quantMethod == "mlx"), hasBits {
+                self.quantizationContainer = try container.decode(
+                    QuantizationContainer.self, forKey: .quantizationConfig)
+            } else {
+                self.quantizationContainer = nil
+            }
+        } else {
+            self.quantizationContainer = nil
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(modelType, forKey: .modelType)
+        try container.encodeIfPresent(quantizationContainer, forKey: .quantizationContainer)
+        try container.encodeIfPresent(textConfiguration, forKey: .textConfiguration)
+        try container.encodeIfPresent(eosTokenIds, forKey: .eosTokenIds)
     }
 }

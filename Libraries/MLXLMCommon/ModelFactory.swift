@@ -46,10 +46,12 @@ public enum ModelFactoryError: LocalizedError {
             return "Missing value at '\(path)'"
         case .dataCorrupted(let context):
             if context.codingPath.isEmpty {
-                return "Invalid JSON"
+                return context.debugDescription.isEmpty ? "Invalid JSON" : context.debugDescription
             } else {
                 let path = context.codingPath.map { $0.stringValue }.joined(separator: ".")
-                return "Invalid data at '\(path)'"
+                return context.debugDescription.isEmpty
+                    ? "Invalid data at '\(path)'"
+                    : "Invalid data at '\(path)': \(context.debugDescription)"
             }
         @unknown default:
             return error.localizedDescription
