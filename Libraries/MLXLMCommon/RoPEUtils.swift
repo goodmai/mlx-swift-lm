@@ -322,10 +322,15 @@ public enum YarnScaling {
 
     /// The factor YaRN multiplies queries and keys (equivalently cos and sin) by on the rotated
     /// dimensions.
+    ///
+    /// As Hugging Face: an explicit `attention_factor` wins; `mscale` counts only together with a
+    /// non-zero `mscale_all_dim`; otherwise the factor is `get_mscale(factor)`.
     public static func attentionFactor(
-        scalingFactor: Float, mscale: Float = 1, mscaleAllDim: Float = 0
+        scalingFactor: Float, mscale: Float = 1, mscaleAllDim: Float = 0, explicit: Float? = nil
     ) -> Float {
+        if let explicit { return explicit }
         func get(_ value: Float) -> Float { scalingFactor <= 1 ? 1 : 0.1 * value * log(scalingFactor) + 1 }
+        guard mscale != 0, mscaleAllDim != 0 else { return get(1) }
         return get(mscale) / get(mscaleAllDim)
     }
 
@@ -347,7 +352,8 @@ public enum YarnScaling {
                 betaSlow: config["beta_slow"]?.asFloat() ?? 1),
             attentionFactor(
                 scalingFactor: factor, mscale: config["mscale"]?.asFloat() ?? 1,
-                mscaleAllDim: config["mscale_all_dim"]?.asFloat() ?? 0)
+                mscaleAllDim: config["mscale_all_dim"]?.asFloat() ?? 0,
+                explicit: config["attention_factor"]?.asFloat())
         )
     }
 }
@@ -392,7 +398,8 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
         betaFast: Float = 32,
         betaSlow: Float = 1,
         mscale: Float = 1,
-        mscaleAllDim: Float = 0
+        mscaleAllDim: Float = 0,
+        attentionFactor: Float? = nil
     ) {
         precondition(dimensions % 2 == 0, "Dimensions must be even")
 
@@ -400,7 +407,8 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
         self.traditional = traditional
 
         self._mscale = YarnScaling.attentionFactor(
-            scalingFactor: scalingFactor, mscale: mscale, mscaleAllDim: mscaleAllDim)
+            scalingFactor: scalingFactor, mscale: mscale, mscaleAllDim: mscaleAllDim,
+            explicit: attentionFactor)
         self._freqs = YarnScaling.periods(
             dimensions: dimensions, base: base, scalingFactor: scalingFactor,
             originalMaxPositionEmbeddings: originalMaxPositionEmbeddings,
@@ -542,7 +550,8 @@ public func initializeRope(
             betaFast: betaFast,
             betaSlow: betaSlow,
             mscale: mscale,
-            mscaleAllDim: mscaleAllDim
+            mscaleAllDim: mscaleAllDim,
+            attentionFactor: scalingConfig?["attention_factor"]?.asFloat()
         )
     } else if ropeType == "longrope" {
         guard let config = scalingConfig else {

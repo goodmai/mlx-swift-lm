@@ -104,7 +104,11 @@ final class AppendOnlyRoundStrategy: KVCacheRoundStrategy {
         let written = writtenPositions
         let keep = Swift.min(Swift.max(retaining, 0), written)
         if written > keep {
-            live.trim(written - keep)
+            let rejected = written - keep
+            let trimmed = live.trim(rejected)
+            precondition(
+                trimmed == rejected,
+                "an append-only leaf took back \(trimmed) of \(rejected) rejected positions; it was admitted on the promise of an exact trim")
         }
     }
 }
