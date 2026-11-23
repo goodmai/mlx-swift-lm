@@ -232,12 +232,19 @@ public enum Qwen35Language {
     final class RotaryEmbedding {
         private let invFreq: MLXArray
         private let mropeIndices: MLXArray
+        private let attentionScaling: Float
 
-        init(dim: Int, base: Float, mropeSection: [Int]) {
+        init(dim: Int, base: Float, mropeSection: [Int], ropeParameters: [String: StringOrNumber]? = nil) {
             let safeDim = max(1, dim)
             var freq = MLXArray(stride(from: 0, to: safeDim, by: 2)).asType(.float32)
             freq = freq / Float(safeDim)
-            self.invFreq = 1.0 / pow(MLXArray(base), freq)
+            if let yarn = YarnScaling.from(ropeParameters, dimensions: safeDim, base: base) {
+                self.invFreq = 1.0 / yarn.periods
+                self.attentionScaling = yarn.attentionFactor
+            } else {
+                self.invFreq = 1.0 / pow(MLXArray(base), freq)
+                self.attentionScaling = 1
+            }
 
             let sections = mropeSection.count >= 3 ? mropeSection : [11, 11, 10]
             var indices = [Int32](repeating: 0, count: freq.dim(0))
@@ -269,7 +276,8 @@ public enum Qwen35Language {
             freqs = applyInterleavedMRope(freqs)
 
             let emb = concatenated([freqs, freqs], axis: -1)
-            return (cos(emb).asType(x.dtype), sin(emb).asType(x.dtype))
+            guard attentionScaling != 1 else { return (cos(emb).asType(x.dtype), sin(emb).asType(x.dtype)) }
+            return ((cos(emb) * attentionScaling).asType(x.dtype), (sin(emb) * attentionScaling).asType(x.dtype))
         }
     }
 
@@ -365,7 +373,8 @@ public enum Qwen35Language {
             let mrope = args.ropeParameters?["mrope_section"]?.asInts() ?? [11, 11, 10]
             let rotaryDim = Int(Float(headDim) * args.partialRotaryFactor)
             self.rotaryEmbedding = RotaryEmbedding(
-                dim: rotaryDim, base: args.ropeTheta, mropeSection: mrope)
+                dim: rotaryDim, base: args.ropeTheta, mropeSection: mrope,
+                ropeParameters: args.ropeParameters)
             super.init()
         }
 

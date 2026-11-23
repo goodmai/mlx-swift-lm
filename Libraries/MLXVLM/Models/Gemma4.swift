@@ -478,6 +478,7 @@ public struct Gemma4TextConfiguration: Codable, Sendable {
                         "rope_type": .string("default"),
                     ],
                 ] : gemma4DefaultTextRopeParameters())
+        try validateGemma4RopeParameters(ropeParameters, codingPath: c.codingPath)
         layerTypes =
             try c.decodeIfPresent([String].self, forKey: CodingKeys.layerTypes)
             ?? gemma4BuildLayerTypes(

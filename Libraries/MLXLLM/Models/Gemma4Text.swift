@@ -177,6 +177,7 @@ public struct Gemma4TextConfiguration: Codable, Sendable {
         self.ropeParameters =
             try container.decodeIfPresent(
                 [String: [String: StringOrNumber]].self, forKey: .ropeParameters)
+        try validateGemma4RopeParameters(ropeParameters, codingPath: container.codingPath)
 
         // Extract RoPE parameters from nested config
         if let ropeParams = ropeParameters {

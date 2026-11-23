@@ -289,6 +289,92 @@ public class ProportionalRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     }
 }
 
+/// YaRN's per-dimension frequencies and attention factor, shared by ``YarnRoPE`` and models that
+/// build their rotary embedding from inverse frequencies (Qwen 3.5's multimodal RoPE).
+///
+/// Matches Hugging Face `_compute_yarn_parameters` with `truncate` on: the correction range is
+/// floored and ceiled, the ramp runs over `dimensions / 2` pairs, and the attention factor is
+/// `get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim)`.
+public enum YarnScaling {
+    /// The wavelength divisor of each rotated pair, `[dimensions / 2]`, in the form
+    /// `MLXFast.RoPE(freqs:)` takes: a pair's angle is `position / period`.
+    public static func periods(
+        dimensions: Int, base: Float, scalingFactor: Float, originalMaxPositionEmbeddings: Int,
+        betaFast: Float = 32, betaSlow: Float = 1
+    ) -> MLXArray {
+        func correctionDim(_ rotations: Float) -> Float {
+            Float(dimensions)
+                * log(Float(originalMaxPositionEmbeddings) / (rotations * 2 * Float.pi))
+                / (2 * log(base))
+        }
+        let low = max(Int(floor(correctionDim(betaFast))), 0)
+        var high = Float(min(Int(ceil(correctionDim(betaSlow))), dimensions - 1))
+        if Float(low) == high { high += 0.001 }
+        let ramp = clip(
+            (MLXArray(0 ..< dimensions / 2).asType(.float32) - Float(low)) / (high - Float(low)),
+            min: 0, max: 1)
+        let mask = 1.0 - ramp
+        let extrapolated = pow(
+            base, MLXArray(stride(from: 0, to: dimensions, by: 2)).asType(.float32) / dimensions)
+        let interpolated = scalingFactor * extrapolated
+        return (interpolated * extrapolated) / (interpolated * mask + extrapolated * (1 - mask))
+    }
+
+    /// The factor YaRN multiplies queries and keys (equivalently cos and sin) by on the rotated
+    /// dimensions.
+    public static func attentionFactor(
+        scalingFactor: Float, mscale: Float = 1, mscaleAllDim: Float = 0
+    ) -> Float {
+        func get(_ value: Float) -> Float { scalingFactor <= 1 ? 1 : 0.1 * value * log(scalingFactor) + 1 }
+        return get(mscale) / get(mscaleAllDim)
+    }
+
+    /// The YaRN periods and attention factor a `rope_parameters` / `rope_scaling` dictionary asks
+    /// for, or `nil` when it asks for no YaRN.
+    public static func from(
+        _ config: [String: StringOrNumber]?, dimensions: Int, base: Float
+    ) -> (periods: MLXArray, attentionFactor: Float)? {
+        guard let config, case .string(let type) = config["rope_type"] ?? config["type"],
+            yarnTypes.contains(type)
+        else { return nil }
+        let factor = config["factor"]?.asFloat() ?? 32
+        return (
+            periods(
+                dimensions: dimensions, base: base, scalingFactor: factor,
+                originalMaxPositionEmbeddings: config["original_max_position_embeddings"]?.asInt()
+                    ?? 4096,
+                betaFast: config["beta_fast"]?.asFloat() ?? 32,
+                betaSlow: config["beta_slow"]?.asFloat() ?? 1),
+            attentionFactor(
+                scalingFactor: factor, mscale: config["mscale"]?.asFloat() ?? 1,
+                mscaleAllDim: config["mscale_all_dim"]?.asFloat() ?? 0)
+        )
+    }
+}
+
+/// Refuses a Gemma 4 `rope_parameters` entry whose `rope_type` its attention cannot honor.
+///
+/// Gemma 4's global layers rotate only part of each head with proportional RoPE (p-RoPE) and its
+/// sliding layers use default RoPE. A scaling type such as `yarn` would make a path that hands the
+/// entry to ``initializeRope(dims:base:traditional:scalingConfig:maxPositionEmbeddings:)`` rotate
+/// every dimension, which breaks the model, while another path ignores it. Neither is right, so
+/// the configuration is refused (goodmai/basalt#729).
+public func validateGemma4RopeParameters(
+    _ parameters: [String: [String: StringOrNumber]]?, codingPath: [any CodingKey]
+) throws {
+    for (layerType, entry) in parameters ?? [:] {
+        guard case .string(let type) = entry["rope_type"] ?? entry["type"] else { continue }
+        guard ["default", "proportional"].contains(type) else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: codingPath,
+                    debugDescription:
+                        "Gemma 4 \(layerType) rope_type '\(type)' is not supported: Gemma 4 uses "
+                        + "proportional RoPE on global layers and takes no RoPE scaling"))
+        }
+    }
+}
+
 public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     let dimensions: Int
     let traditional: Bool
@@ -313,55 +399,12 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
         self.dimensions = dimensions
         self.traditional = traditional
 
-        func yarnFindCorrectionDim(numRotations: Float) -> Float {
-            return Float(dimensions)
-                * log(Float(originalMaxPositionEmbeddings) / (numRotations * 2 * Float.pi))
-                / (2 * log(base))
-        }
-
-        func yarnFindCorrectionRange() -> (low: Int, high: Int) {
-            let low = Int(floor(yarnFindCorrectionDim(numRotations: betaFast)))
-            let high = Int(ceil(yarnFindCorrectionDim(numRotations: betaSlow)))
-            return (max(low, 0), min(high, dimensions - 1))
-        }
-
-        func yarnGetMscale(scale: Float, mscale: Float) -> Float {
-            if scale <= 1 {
-                return 1.0
-            }
-            return 0.1 * mscale * log(scale) + 1.0
-        }
-
-        func yarnLinearRampMask(minVal: Float, maxVal: Float, dim: Int) -> MLXArray {
-            var maxVal = maxVal
-            if minVal == maxVal {
-                maxVal += 0.001
-            }
-
-            let linearFunc = (MLXArray(0 ..< dim).asType(.float32) - minVal) / (maxVal - minVal)
-            return clip(linearFunc, min: 0, max: 1)
-        }
-
-        self._mscale =
-            yarnGetMscale(scale: scalingFactor, mscale: mscale)
-            / yarnGetMscale(scale: scalingFactor, mscale: mscaleAllDim)
-
-        let freqExtra = pow(
-            base,
-            MLXArray(stride(from: 0, to: dimensions, by: 2)).asType(.float32)
-                / dimensions)
-        let freqInter =
-            scalingFactor
-            * pow(
-                base,
-                MLXArray(stride(from: 0, to: dimensions, by: 2)).asType(.float32)
-                    / dimensions)
-
-        let (low, high) = yarnFindCorrectionRange()
-        let freqMask =
-            1.0 - yarnLinearRampMask(minVal: Float(low), maxVal: Float(high), dim: dimensions / 2)
-
-        self._freqs = (freqInter * freqExtra) / (freqInter * freqMask + freqExtra * (1 - freqMask))
+        self._mscale = YarnScaling.attentionFactor(
+            scalingFactor: scalingFactor, mscale: mscale, mscaleAllDim: mscaleAllDim)
+        self._freqs = YarnScaling.periods(
+            dimensions: dimensions, base: base, scalingFactor: scalingFactor,
+            originalMaxPositionEmbeddings: originalMaxPositionEmbeddings,
+            betaFast: betaFast, betaSlow: betaSlow)
     }
 
     public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
