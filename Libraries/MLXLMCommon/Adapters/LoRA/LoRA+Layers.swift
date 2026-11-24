@@ -214,7 +214,7 @@ public class QLoRALinear: QuantizedLinear, LoRALayer {
     }
 
     public override func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let y = super.callAsFunction(x.asType(scales.dtype))
+        let y = super.callAsFunction(scales.dtype.isFloatingPoint ? x.asType(scales.dtype) : x)
         if !loraEnabled { return y }
         let z = matmul(matmul(dropout(x), self.loraA), self.loraB)
         return y + (scale * z).asType(y.dtype)
