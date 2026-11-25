@@ -388,7 +388,7 @@ public func loadWeights(
     if quantization != nil || perLayerQuantization != nil {
         var updates = [(String, Module)]()
         for (path, module) in model.leafModules().flattened() {
-            guard weights["\(path).scales"] != nil else { continue }
+            guard weights["\(path).scales"] != nil, !(module is Quantized) else { continue }
             let spec: (Int, Int, QuantizationMode)? =
                 if let perLayerQuantization {
                     perLayerQuantization.quantization(layer: path)?.asTuple
