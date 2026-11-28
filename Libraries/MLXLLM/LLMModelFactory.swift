@@ -111,6 +111,7 @@ public enum LLMTypeRegistry {
         "mistral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
         "apertus": create(ApertusConfiguration.self, ApertusModel.init),
         "hunyuan_v1_dense": create(HunyuanConfiguration.self, HunyuanModel.init),
+        "hy_v3": create(HYV3Configuration.self, HYV3Model.init),
         "nemotron_labs_diffusion": create(
             NemotronLabsDiffusionConfiguration.self, NemotronLabsDiffusionModel.init),
     ])
