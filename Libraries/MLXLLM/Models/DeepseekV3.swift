@@ -478,9 +478,40 @@ public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
             }
         }
 
+        // Current mlx-lm packs store kv_b_proj split per head into `embed_q`
+        // (W_UK transposed, [heads, kv_lora, qk_nope]) and `unembed_out`
+        // (W_UV, [heads, v, kv_lora]). This model keeps one kv_b_proj Linear, so
+        // rebuild it: the two forms compute the same attention.
+        for l in 0 ..< args.numHiddenLayers {
+            let prefix = "model.layers.\(l).self_attn"
+            guard let embedQ = Self.dense(newWeights, "\(prefix).embed_q", inputs: args.qkNopeHeadDim),
+                let unembedOut = Self.dense(newWeights, "\(prefix).unembed_out", inputs: args.kvLoraRank)
+            else { continue }
+            let perHead = concatenated([embedQ.transposed(0, 2, 1), unembedOut], axis: 1)
+            newWeights["\(prefix).kv_b_proj.weight"] = perHead.reshaped([-1, args.kvLoraRank])
+            for name in ["embed_q", "unembed_out"] {
+                for suffix in ["weight", "scales", "biases"] {
+                    newWeights["\(prefix).\(name).\(suffix)"] = nil
+                }
+            }
+        }
+
         return newWeights.filter { key, _ in
             !isMultiTokenPredictionLayer(key) && !key.contains("rotary_emb.inv_freq")
         }
+    }
+
+    /// The float weight stored under `stem`, dequantized when the pack quantized it.
+    /// Bits and group size are inferred from the shapes, as mlx-lm does.
+    private static func dense(_ weights: [String: MLXArray], _ stem: String, inputs: Int) -> MLXArray? {
+        guard let weight = weights["\(stem).weight"] else { return nil }
+        guard let scales = weights["\(stem).scales"] else { return weight }
+        let bits = weight.dim(-1) * 32 / inputs
+        let groupSize = inputs / scales.dim(-1)
+        let biases = weights["\(stem).biases"]
+        let mode: QuantizationMode = biases != nil ? .affine : (bits == 8 ? .mxfp8 : .mxfp4)
+        return dequantized(
+            weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits, mode: mode)
     }
 
     public var loraLayers: [Module] {
