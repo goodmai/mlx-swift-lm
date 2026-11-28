@@ -419,4 +419,107 @@ struct TextToolCallRecoveryTests {
         #expect(native.rejectedToolCalls.first?.reason == .invalidArguments)
         #expect(native.rejectedToolCalls.first?.detail == "arguments.city is required")
     }
+
+    // MARK: - Inline code spans protect only when they close (goodmai/basalt#887)
+
+    private static let xmlCall =
+        "<tool_call>\n<function=weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
+
+    private static let xmlCallOnOneLine =
+        "<tool_call><function=weather><parameter=city>Paris</parameter></function></tool_call>"
+
+    private struct Stream: Equatable {
+        var text = ""
+        var cities: [JSONValue?] = []
+        var rejections = 0
+        /// Calls that were already out before end of stream.
+        var callsBeforeEOS = 0
+    }
+
+    private func stream(_ chunks: [String]) -> Stream {
+        let processor = ToolCallProcessor(format: .xmlFunction, tools: Self.tools)
+        var outputs: [ToolCallProcessor.Output] = []
+        for chunk in chunks { outputs += processor.processChunkOutputs(chunk) }
+        var result = Stream()
+        result.callsBeforeEOS = outputs.count { if case .toolCall = $0 { true } else { false } }
+        outputs += processor.processEOSOutputs()
+        for output in outputs {
+            switch output {
+            case .response(let text): result.text += text
+            case .toolCall(let call): result.cities.append(call.function.arguments["city"])
+            case .rejectedToolCall: result.rejections += 1
+            }
+        }
+        return result
+    }
+
+    /// The whole message, one character at a time and fixed chunks of 2, 3, 5 and 7.
+    private func expectEveryChunking(of text: String, gives expected: Stream) {
+        for size in [text.count, 1, 2, 3, 5, 7] {
+            let chunks = stride(from: 0, to: text.count, by: size).map {
+                String(text.dropFirst($0).prefix(size))
+            }
+            #expect(stream(chunks) == expected, "chunks of \(size): \(text.debugDescription)")
+        }
+    }
+
+    @Test(
+        "A backtick that never closes in its paragraph is text and does not hide a later call",
+        arguments: [
+            "Use a ` here.\n",
+            "Use a ` here.\n\nNow: ",
+            "A `` pair and a ` single.\n  ",
+            "Run `ls` and a ` tick.\n",
+            "``a ` b`` then\n",
+            "Use a ` here. ",
+            "He said \"go.\n",
+        ])
+    func unmatchedBacktickDoesNotHideACall(prose: String) {
+        expectEveryChunking(
+            of: prose + Self.xmlCall + "\nDone.",
+            gives: Stream(text: prose + "\nDone.", cities: [.string("Paris")], callsBeforeEOS: 1))
+    }
+
+    /// Nothing ends the paragraph before the stream does, so only then is the
+    /// backtick known to be text; the call comes out once, at end of stream.
+    @Test("A backtick before a call written on that same single line is decided at end of stream")
+    func unmatchedBacktickBeforeAOneLineCallIsDecidedAtEOS() {
+        expectEveryChunking(
+            of: "Use a ` here. " + Self.xmlCallOnOneLine,
+            gives: Stream(text: "Use a ` here. ", cities: [.string("Paris")]))
+    }
+
+    @Test("Backticks inside the value do not close a backtick left open in the prose")
+    func unmatchedBacktickDoesNotPairWithOneInAValue() {
+        let call = Self.xmlCall.replacingOccurrences(of: "Paris", with: "echo `date` > `tty")
+        expectEveryChunking(
+            of: "Use a ` here.\n" + call,
+            gives: Stream(
+                text: "Use a ` here.\n", cities: [.string("echo `date` > `tty")],
+                callsBeforeEOS: 1))
+    }
+
+    @Test(
+        "Tool syntax inside a closed inline span or a fenced block, closed or open, stays text",
+        arguments: [
+            "Write `\(xmlCallOnOneLine)` to call it.",
+            "Write `\(xmlCallOnOneLine)`",
+            "Write ``\(xmlCallOnOneLine)`` or\n`\(xmlCallOnOneLine)`\n\n",
+            "Write ``<tool_call>`` and `</tool_call>` around `<function=weather>`.",
+            "A ` tick.\n```xml\n\(xmlCall)\n```\nDone.",
+            "A ` tick.\n\n~~~\n\(xmlCall)\n~~~\n",
+            "```\n\(xmlCall)\n",
+            "Text\n```\n`\n\(xmlCall)",
+        ])
+    func codeStillProtects(text: String) {
+        expectEveryChunking(of: text, gives: Stream(text: text))
+    }
+
+    @Test("A call after closed code is still a call")
+    func callAfterClosedCodeIsACall() {
+        let prose = "Use `weather`:\n```\nexample\n```\n"
+        expectEveryChunking(
+            of: prose + Self.xmlCall,
+            gives: Stream(text: prose, cities: [.string("Paris")], callsBeforeEOS: 1))
+    }
 }

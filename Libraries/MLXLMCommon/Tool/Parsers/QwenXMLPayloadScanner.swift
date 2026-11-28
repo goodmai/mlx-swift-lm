@@ -13,7 +13,10 @@ import Foundation
 ///
 /// - the function close is the structural close, not the first textual
 ///   `</function>` (a parameter value may contain that literal),
-/// - every opened `<parameter=` must close with `</parameter>`,
+/// - every opened `<parameter=` must close with `</parameter>`; the close is
+///   the earliest `</parameter>` followed, after optional whitespace, by
+///   `<parameter=`, `</function>` or the end of the payload, so a value may
+///   contain a literal `</parameter>` that is followed by anything else,
 /// - the payload must be consumed in full, apart from whitespace.
 enum QwenXMLPayloadScanner {
 
@@ -111,13 +114,25 @@ enum QwenXMLPayloadScanner {
             }
             let valueStart = text.index(after: parameterNameEnd)
 
-            // The parameter value is opaque text up to the first
-            // `</parameter>`. An unterminated value may simply need more input;
-            // the bounded buffer upstream decides when to give up.
-            guard
-                let valueEnd = text.range(
-                    of: parameterClose, range: valueStart ..< text.endIndex)
-            else { return .needMore }
+            // The parameter value is opaque, unescaped text, so it may hold a
+            // literal `</parameter>`. The close is the earliest one that is
+            // followed by what may legally follow a parameter. An unterminated
+            // value may simply need more input; the bounded buffer upstream
+            // decides when to give up.
+            var searchStart = valueStart
+            var valueEnd: Range<String.Index>
+            closeSearch: while true {
+                guard
+                    let candidate = text.range(
+                        of: parameterClose, range: searchStart ..< text.endIndex)
+                else { return .needMore }
+                valueEnd = candidate
+                switch parameterCloseFollower(in: text, at: candidate.upperBound) {
+                case .matched: break closeSearch
+                case .needMore: return .needMore
+                case .noMatch: searchStart = candidate.upperBound
+                }
+            }
             parameters.append(
                 (name: String(parameterName), value: text[valueStart ..< valueEnd.lowerBound]))
             index = valueEnd.upperBound
@@ -190,6 +205,32 @@ enum QwenXMLPayloadScanner {
         case noMatch
     }
 
+    /// Whether a `</parameter>` ending at `index` closes its value: after
+    /// optional whitespace only `<parameter=`, `</function>` or the end of the
+    /// buffer may follow. `.needMore` means the buffer ends inside one of those
+    /// tags, so a streaming caller must wait instead of closing early; at the
+    /// end of the buffer the caller's own loop decides (more input, or the
+    /// end-of-stream repair).
+    private static func parameterCloseFollower(
+        in text: Substring,
+        at index: String.Index
+    ) -> LiteralMatch {
+        var index = index
+        while index < text.endIndex, text[index].isWhitespace {
+            index = text.index(after: index)
+        }
+        guard index < text.endIndex else { return .matched(after: index) }
+        var result = LiteralMatch.noMatch
+        for literal in [parameterOpen, functionClose] {
+            switch matchLiteral(literal, in: text, at: index) {
+            case .matched: return .matched(after: index)
+            case .needMore: result = .needMore
+            case .noMatch: break
+            }
+        }
+        return result
+    }
+
     /// Match `literal` at `index`, distinguishing "not here" from "the buffer
     /// ended while it could still complete".
     private static func matchLiteral(
@@ -222,8 +263,9 @@ extension QwenXMLPayloadScanner.Payload {
             var value = String(parameter.value)
             // Trim a single leading/trailing newline (matching the Qwen3 Coder
             // reference implementation, which formats values on their own line).
-            if value.hasPrefix("\n") { value = String(value.dropFirst()) }
-            if value.hasSuffix("\n") { value = String(value.dropLast()) }
+            // `\r\n` is one Character, so it is named explicitly.
+            if let first = value.first, first == "\n" || first == "\r\n" { value.removeFirst() }
+            if let last = value.last, last == "\n" || last == "\r\n" { value.removeLast() }
             arguments[parameter.name] = convertParameterValue(
                 value, paramName: parameter.name, funcName: name, tools: tools)
         }

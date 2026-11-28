@@ -11,7 +11,9 @@ import Foundation
 ///
 /// - the function close is the *structural* close rather than the first textual
 ///   `</function>`, so a parameter value may contain that literal verbatim;
-/// - every `<parameter=` must close with `</parameter>`;
+/// - every `<parameter=` must close with a `</parameter>` that is followed by
+///   `<parameter=`, `</function>` or the end of the payload, so a value may
+///   also contain a literal `</parameter>` followed by anything else;
 /// - nothing but whitespace may follow the payload inside its frame.
 ///
 /// A malformed payload yields `nil` instead of a partially populated call. This

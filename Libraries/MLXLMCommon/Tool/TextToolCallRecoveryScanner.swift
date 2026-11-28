@@ -19,7 +19,11 @@ import Foundation
 ///   and reject candidate calls while reasoning; a call mentioned there is not
 ///   a committed action and is never promoted.
 /// - **code** (Markdown fenced blocks and inline code spans): examples and
-///   documentation of tool syntax are data, not actions.
+///   documentation of tool syntax are data, not actions. A fenced block
+///   protects from its opening line, closed or not. An inline span protects
+///   only once it closes: a backtick run with no matching run before the end of
+///   its paragraph is literal text, as in CommonMark, and so cannot hide a
+///   later call.
 /// - **JSON data** (objects, arrays and strings): ordinary structured output
 ///   remains response data; protocol-shaped string contents stay inert.
 /// - **native frames** (the selected format's own protocol): opaque to
@@ -69,7 +73,6 @@ struct TextToolCallRecoveryScanner: Sendable {
         case response
         case reasoning(close: String)
         case codeFence(character: Character, count: Int)
-        case codeSpan(count: Int)
         case jsonValue
         case nativeFrame(endMarker: String)
         case nativeUntilEOS
@@ -110,6 +113,9 @@ struct TextToolCallRecoveryScanner: Sendable {
     private let allowedToolNames: Set<String>
     private let allowedToolNamesByLength: [String]
     private let signals: [Signal]
+    /// Markers that open a tool call, native or alternate. One at the start of
+    /// a line ends the search for an inline code span's closing run.
+    private let toolCallOpeners: [String]
     private let potentialSignalPrefixes: Set<String>
     private let maximumPotentialSignalPrefixLength: Int
     private let potentialPrefixEndCharacters: Set<Character>
@@ -129,6 +135,9 @@ struct TextToolCallRecoveryScanner: Sendable {
     private var context: Context = .response
     private var previousSourceCharacter: Character?
     private var pendingCandidate: PendingCandidate?
+    /// Set while `finish()` drains the buffer: nothing more can arrive, so an
+    /// inline code span that has not closed never will.
+    private var atEOS = false
 
     /// Bytes that can begin a signal or context and therefore disqualify a
     /// chunk from the pass-through fast path.
@@ -179,6 +188,7 @@ struct TextToolCallRecoveryScanner: Sendable {
                 signals.append(Signal(text: marker, kind: .explicit(kind)))
             }
         }
+        self.toolCallOpeners = signals.map(\.text)
         signals.append(Signal(text: "<thinking>", kind: .reasoning(close: "</thinking>")))
         signals.append(Signal(text: "<think>", kind: .reasoning(close: "</think>")))
         signals.append(Signal(text: "[THINK]", kind: .reasoning(close: "[/THINK]")))
@@ -288,17 +298,6 @@ struct TextToolCallRecoveryScanner: Sendable {
                 }
                 releaseProtectedAllButSuffix(
                     closingFenceRetention(in: buffer, character: character), &output)
-                break scanLoop
-
-            case .codeSpan(let count):
-                if let close = spanCloseEnd(in: buffer, count: count) {
-                    appendProtectedText(String(buffer[..<close]), to: &output)
-                    buffer = String(buffer[close...])
-                    context = .response
-                    continue
-                }
-                releaseProtectedAllButSuffix(
-                    trailingRunLength(in: buffer, character: "`"), &output)
                 break scanLoop
 
             case .jsonValue:
@@ -468,13 +467,29 @@ struct TextToolCallRecoveryScanner: Sendable {
                 case .codeBacktick:
                     let run = backtickRun(in: buffer)
                     guard run.terminated else { break scanLoop }
-                    let isFence = run.count >= 3 && isLineStart(buffer.startIndex, in: buffer)
-                    appendProtectedText(String(buffer[..<run.end]), to: &output)
-                    buffer = String(buffer[run.end...])
-                    context =
-                        isFence
-                        ? .codeFence(character: "`", count: run.count)
-                        : .codeSpan(count: run.count)
+                    if run.count >= 3, isLineStart(buffer.startIndex, in: buffer) {
+                        appendProtectedText(String(buffer[..<run.end]), to: &output)
+                        buffer = String(buffer[run.end...])
+                        context = .codeFence(character: "`", count: run.count)
+                        continue
+                    }
+                    // An inline span is held back until it is known to close,
+                    // so its content is emitted once, as code or as text.
+                    switch inlineSpan(in: buffer, openedBy: run) {
+                    case .closed(let end):
+                        appendProtectedText(String(buffer[..<end]), to: &output)
+                        buffer = String(buffer[end...])
+                    case .literal:
+                        appendText(String(buffer[..<run.end]), to: &output)
+                        buffer = String(buffer[run.end...])
+                    case .undecided:
+                        guard buffer.utf8.count > maximumBufferedByteCount else {
+                            break scanLoop
+                        }
+                        // Fail closed for the window that could not be decided.
+                        appendProtectedText(buffer, to: &output)
+                        buffer.removeAll(keepingCapacity: true)
+                    }
 
                 case .codeTilde:
                     let run = tildeRun(in: buffer)
@@ -573,6 +588,8 @@ struct TextToolCallRecoveryScanner: Sendable {
     /// response text. Native frames alone remain the native parser's own
     /// end-of-stream responsibility.
     mutating func finish() -> [Output] {
+        atEOS = true
+        defer { atEOS = false }
         var output = process("")
         guard !buffer.isEmpty else {
             // `ToolCallProcessor` supports reuse after EOS. A native opening
@@ -595,7 +612,7 @@ struct TextToolCallRecoveryScanner: Sendable {
             match.range.lowerBound == buffer.startIndex
         else {
             switch context {
-            case .reasoning, .codeFence, .codeSpan, .jsonValue, .opaqueUntilEOS:
+            case .reasoning, .codeFence, .jsonValue, .opaqueUntilEOS:
                 appendProtectedText(buffer, to: &output)
             case .response, .nativeFrame, .nativeUntilEOS:
                 appendText(buffer, to: &output)
@@ -931,12 +948,42 @@ struct TextToolCallRecoveryScanner: Sendable {
         return text.distance(from: lineStart, to: text.endIndex)
     }
 
-    /// The end of the backtick run that closes an inline code span. CommonMark
-    /// requires the closing run to have exactly the opening run's length.
-    private func spanCloseEnd(in text: String, count: Int) -> String.Index? {
-        var index = text.startIndex
+    private enum InlineSpan {
+        /// The span closes; `end` is just past its closing run.
+        case closed(end: String.Index)
+        /// The opening run is literal text.
+        case literal
+        case undecided
+    }
+
+    /// Whether the backtick run at the start of `text` opens an inline code
+    /// span. As in CommonMark, it does only if a run of exactly the same length
+    /// follows in the same paragraph. The paragraph ends at a blank line, at a
+    /// line that opens a fenced block, and at the end of the stream. A line
+    /// that begins with a tool-call opener ends it as well: chat templates
+    /// write a call on its own line, and a multi-line example of one belongs in
+    /// a fenced block, which still protects it.
+    private func inlineSpan(
+        in text: String, openedBy run: (count: Int, end: String.Index, terminated: Bool)
+    ) -> InlineSpan {
+        var index = run.end
+        var atLineStart = false
         while index < text.endIndex {
+            if atLineStart {
+                atLineStart = false
+                while index < text.endIndex, text[index] == " " || text[index] == "\t" {
+                    index = text.index(after: index)
+                }
+                let line = text[index...]
+                guard let first = line.first else { break }
+                if first.isNewline || line.hasPrefix("```") || line.hasPrefix("~~~")
+                    || toolCallOpeners.contains(where: { line.hasPrefix($0) })
+                {
+                    return .literal
+                }
+            }
             guard text[index] == "`" else {
+                atLineStart = text[index].isNewline
                 index = text.index(after: index)
                 continue
             }
@@ -945,12 +992,15 @@ struct TextToolCallRecoveryScanner: Sendable {
                 runEnd = text.index(after: runEnd)
             }
             // A run touching the buffer end may still grow; wait.
-            guard runEnd < text.endIndex else { return nil }
-            let length = text.distance(from: index, to: runEnd)
-            if length == count { return runEnd }
+            guard runEnd < text.endIndex || atEOS else { break }
+            if text.distance(from: index, to: runEnd) == run.count {
+                return .closed(end: runEnd)
+            }
             index = runEnd
         }
-        return nil
+        // shortcut: an undecided span is rescanned from its start on every chunk
+        // (quadratic up to the buffer limit); keep a resume offset if a profile shows it.
+        return atEOS ? .literal : .undecided
     }
 
     // MARK: - Candidate extents

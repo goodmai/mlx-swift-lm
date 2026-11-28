@@ -393,4 +393,133 @@ struct XMLFunctionParserStrictnessTests {
             #expect(processor.rejectedToolCalls.count == 1)
         }
     }
+
+    // MARK: - A literal </parameter> inside a value (goodmai/basalt#887)
+
+    /// What one stream produced, in a form two chunkings can be compared by.
+    private struct Parsed: Equatable {
+        var text = ""
+        var calls: [ToolCall.Function] = []
+        var rejections: [RejectedToolCall.Reason] = []
+    }
+
+    private func parsed(
+        _ chunks: [String], format: ToolCallFormat = .xmlFunction, tools: String...
+    ) -> Parsed {
+        let processor = ToolCallProcessor(
+            format: format,
+            tools: tools.map { ["function": ["name": $0] as [String: any Sendable]] })
+        var outputs: [ToolCallProcessor.Output] = []
+        for chunk in chunks { outputs += processor.processChunkOutputs(chunk) }
+        outputs += processor.processEOSOutputs()
+        var parsed = Parsed()
+        for output in outputs {
+            switch output {
+            case .response(let text): parsed.text += text
+            case .toolCall(let call): parsed.calls.append(call.function)
+            case .rejectedToolCall(let rejection): parsed.rejections.append(rejection.reason)
+            }
+        }
+        return parsed
+    }
+
+    /// One character at a time, fixed chunks of 2, 3, 5 and 7, and two chunks
+    /// split at every offset.
+    private func chunkings(of text: String) -> [[String]] {
+        [1, 2, 3, 5, 7].map { size in
+            stride(from: 0, to: text.count, by: size).map {
+                String(text.dropFirst($0).prefix(size))
+            }
+        } + (0 ... text.count).map { [String(text.prefix($0)), String(text.dropFirst($0))] }
+    }
+
+    /// The form the Qwen3-Coder chat template writes: every tag on its own line.
+    private func bashCall(_ command: String, newline: String = "\n") -> String {
+        [
+            "<tool_call>", "<function=Bash>", "<parameter=command>", command, "</parameter>",
+            "</function>", "</tool_call>",
+        ].joined(separator: newline)
+    }
+
+    @Test(
+        "A value keeps a literal </parameter> that is not followed by <parameter= or </function>",
+        arguments: [
+            "echo '</parameter>' done",
+            "first line\n</parameter>\nsecond line",
+            "the value ends with </parameter>",
+            "</parameter>",
+            "</parameter></parameter>\n</parameter>",
+            "a </function> b </tool_call> c </parameter> d <parameter=x> e",
+        ])
+    func literalParameterCloseIsPreserved(command: String) {
+        let expected = Parsed(calls: [.init(name: "Bash", arguments: ["command": command])])
+
+        for newline in ["\n", "\r\n"] {
+            let payload = bashCall(command, newline: newline)
+            #expect(
+                parser.parse(content: payload, tools: nil)?.function == expected.calls[0],
+                "newline: \(newline.debugDescription)")
+            for chunks in chunkings(of: payload) {
+                #expect(
+                    parsed(chunks, tools: "Bash") == expected,
+                    "newline: \(newline.debugDescription), chunks: \(chunks.prefix(2))")
+            }
+        }
+    }
+
+    @Test("A single-line value keeps a literal </parameter> and still closes without a newline")
+    func literalParameterCloseInSingleLineValues() {
+        let payload =
+            "<tool_call><function=Bash><parameter=command>echo '</parameter>' done</parameter>"
+            + "<parameter=cwd>/tmp</parameter></function></tool_call>"
+        let expected = Parsed(calls: [
+            .init(name: "Bash", arguments: ["command": "echo '</parameter>' done", "cwd": "/tmp"])
+        ])
+
+        #expect(parser.parse(content: payload, tools: nil)?.function == expected.calls[0])
+        for chunks in chunkings(of: payload) {
+            #expect(parsed(chunks, tools: "Bash") == expected, "chunks: \(chunks.prefix(2))")
+        }
+    }
+
+    /// Values are not escaped, so this text has two readings. The earliest
+    /// legal close wins: the alternative, the latest one, would merge every
+    /// parameter of an ordinary multi-parameter call into the first.
+    @Test("A value holding </parameter> and then <parameter=…> splits at the earliest legal close")
+    func literalCloseFollowedByParameterOpenSplitsTheValue() {
+        let payload = bashCall("a\n</parameter>\n<parameter=x>\nb")
+        let expected = Parsed(calls: [.init(name: "Bash", arguments: ["command": "a", "x": "b"])])
+
+        for chunks in chunkings(of: payload) {
+            #expect(parsed(chunks, tools: "Bash") == expected, "chunks: \(chunks.prefix(2))")
+        }
+    }
+
+    @Test("A stream that ends inside or right after a value with a literal </parameter> terminates")
+    func truncatedLiteralParameterCloseTerminates() {
+        let payload = bashCall("echo '</parameter>' done")
+        let cuts = ["' done", "' done\n</parameter>", "' done\n</parameter>\n</func"]
+
+        for cut in cuts {
+            let prefix = String(payload[..<payload.range(of: cut)!.upperBound])
+            for chunks in chunkings(of: prefix) {
+                #expect(
+                    parsed(chunks, tools: "Bash") == Parsed(rejections: [.incompleteOutput]),
+                    "cut after \(cut.debugDescription), chunks: \(chunks.prefix(2))")
+            }
+        }
+    }
+
+    @Test("The recovered bare <function= dialect keeps a literal </parameter> at every boundary")
+    func recoveredDialectKeepsLiteralParameterClose() {
+        let payload = "<function=Bash><parameter=command>a</parameter>b</parameter></function>"
+        let expected = Parsed(
+            calls: [.init(name: "Bash", arguments: ["command": "a</parameter>b"])])
+
+        for chunks in chunkings(of: payload) {
+            #expect(
+                parsed(chunks, format: .json, tools: "Bash") == expected,
+                "chunks: \(chunks.prefix(2))")
+        }
+    }
 }
