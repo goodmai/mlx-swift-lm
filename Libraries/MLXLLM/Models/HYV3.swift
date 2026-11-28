@@ -112,7 +112,10 @@ class HYV3MoE: Module, UnaryLayer {
 
     func callAsFunction(_ x: MLXArray, probe: (any ForwardProbe)?, layer: Int) -> MLXArray {
         // The router runs in float32, as in the reference: its logits decide which experts run.
-        var logits = x.asType(.float32).matmul(router.gate.weight.asType(.float32).T)
+        var logits =
+            router.gate is Quantized
+            ? router.gate(x).asType(.float32)
+            : x.asType(.float32).matmul(router.gate.weight.asType(.float32).T)
         if let probe { logits = probe.maskedRouterLogits(layer: layer, logits) }
         let scores = sigmoid(logits)
         let selection = scores + expertBias.asType(.float32)
