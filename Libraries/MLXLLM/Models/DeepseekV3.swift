@@ -19,7 +19,7 @@ public struct DeepseekV3Configuration: Codable, Sendable {
     var nRoutedExperts: Int?
     var routedScalingFactor: Float
     var kvLoraRank: Int
-    var qLoraRank: Int
+    var qLoraRank: Int?
     var qkRopeHeadDim: Int
     var vHeadDim: Int
     var qkNopeHeadDim: Int
