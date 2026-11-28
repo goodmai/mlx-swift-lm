@@ -90,7 +90,7 @@ class HYV3MoE: Module, UnaryLayer {
     @ModuleInfo(key: "router") var router: HYV3Router
     @ParameterInfo(key: "expert_bias") var expertBias: MLXArray
     @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
-    @ModuleInfo(key: "shared_mlp") var sharedMLP: HYV3MLP
+    @ModuleInfo(key: "shared_mlp") var sharedMLP: HYV3MLP?
 
     init(_ args: HYV3Configuration) {
         self.topK = args.numExpertsPerToken
@@ -101,9 +101,12 @@ class HYV3MoE: Module, UnaryLayer {
         _switchMLP.wrappedValue = SwitchGLU(
             inputDims: args.hiddenSize, hiddenDims: args.moeIntermediateSize,
             numExperts: args.numExperts)
-        _sharedMLP.wrappedValue = HYV3MLP(
-            dimensions: args.hiddenSize,
-            hiddenDimensions: args.moeIntermediateSize * args.numSharedExperts)
+        // A checkpoint with no shared expert has no shared_mlp weights to load.
+        if args.numSharedExperts > 0 {
+            _sharedMLP.wrappedValue = HYV3MLP(
+                dimensions: args.hiddenSize,
+                hiddenDimensions: args.moeIntermediateSize * args.numSharedExperts)
+        }
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -132,7 +135,9 @@ class HYV3MoE: Module, UnaryLayer {
         probe?.routerTopK(layer: layer, indices: inds, gates: weights)
 
         let y = switchMLP(x, inds)
-        return weightedExpertSum(y, weights).asType(y.dtype) + sharedMLP(x)
+        let routed = weightedExpertSum(y, weights).asType(y.dtype)
+        guard let sharedMLP else { return routed }
+        return routed + sharedMLP(x)
     }
 }
 
@@ -250,9 +255,13 @@ public class HYV3Model: Module, LLMModel, KVCacheDimensionProvider {
             for name in ["up_proj", "down_proj", "gate_proj"] {
                 for suffix in ["weight", "scales", "biases"]
                 where sanitized["\(prefix).experts.0.\(name).\(suffix)"] != nil {
-                    let parts = (0 ..< configuration.numExperts).map { e in
-                        sanitized.removeValue(forKey: "\(prefix).experts.\(e).\(name).\(suffix)")!
+                    // An incomplete per-expert set is left as it is, so the strict load reports the missing keys.
+                    let keys = (0 ..< configuration.numExperts).map {
+                        "\(prefix).experts.\($0).\(name).\(suffix)"
                     }
+                    let parts = keys.compactMap { sanitized[$0] }
+                    guard parts.count == keys.count else { continue }
+                    keys.forEach { sanitized.removeValue(forKey: $0) }
                     sanitized["\(prefix).switch_mlp.\(name).\(suffix)"] = MLX.stacked(parts)
                 }
             }
