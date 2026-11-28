@@ -133,7 +133,7 @@ class DeepseekV3Attention: Module {
             self._qAProj.wrappedValue = Linear(
                 hiddenSize, qLoraRank, bias: config.attentionBias
             )
-            self._qALayerNorm.wrappedValue = RMSNorm(dimensions: qLoraRank)
+            self._qALayerNorm.wrappedValue = RMSNorm(dimensions: qLoraRank, eps: 1e-6)
             self._qBProj.wrappedValue = Linear(
                 qLoraRank, numHeads * qHeadDim, bias: false
             )
@@ -146,7 +146,7 @@ class DeepseekV3Attention: Module {
             kvLoraRank + qkRopeHeadDim,
             bias: config.attentionBias
         )
-        self._kvALayerNorm.wrappedValue = RMSNorm(dimensions: kvLoraRank)
+        self._kvALayerNorm.wrappedValue = RMSNorm(dimensions: kvLoraRank, eps: 1e-6)
         self._kvBProj.wrappedValue = Linear(
             kvLoraRank,
             numHeads * (qHeadDim - qkRopeHeadDim + vHeadDim),
@@ -267,27 +267,24 @@ class MoEGate: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
-        let (bsz, seqLen, _) = (x.dim(0), x.dim(1), x.dim(2))
-
-        let hiddenStates = x.matmul(weight.T)
-        var scores = sigmoid(hiddenStates)
-        let scoresForChoice = scores + e_score_correction_bias
-        let groupScores = scoresForChoice.reshaped(bsz, seqLen, self.nGroup, -1)
-        let topKGroup = top(groupScores, k: 2, axis: -1).sum(axis: -1, keepDims: true)
-        var k = nGroup - (topkGroup ?? 1)
-        var groupIdx = argPartition(topKGroup, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
-        groupIdx = broadcast(groupIdx, to: [bsz, seqLen, k, (nRoutedExperts ?? 1) / nGroup])
-        scores = putAlong(groupScores, stopGradient(groupIdx), values: MLXArray(0.0), axis: -2)
-        scores = flattened(scores, start: -2, end: -1)
-
-        k = topK ?? 1
-        let inds = argPartition(-scores, kth: k - 1, axis: -1)[.ellipsis, ..<k]
-        scores = takeAlong(scores, inds, axis: -1)
-        if topK ?? 1 > 1, normTopkProb {
-            let denominator = scores.sum(axis: -1, keepDims: true) + 1e-20
-            scores = scores / denominator
-            scores = scores * routedScalingFactor
+        let originalScores = sigmoid(x.matmul(weight.T).asType(.float32))
+        var scores = originalScores + e_score_correction_bias
+        if nGroup > 1 {
+            scores = unflatten(scores, axis: -1, shape: [nGroup, -1])
+            let groupScores = top(scores, k: 2, axis: -1).sum(axis: -1, keepDims: true)
+            let k = nGroup - (topkGroup ?? 1)
+            let groupIdx = argPartition(groupScores, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
+            scores = putAlong(scores, stopGradient(groupIdx), values: MLXArray(0.0), axis: -2)
+            scores = flattened(scores, start: -2, end: -1)
         }
+
+        let k = topK ?? 1
+        let inds = argPartition(-scores, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+        scores = takeAlong(originalScores, inds, axis: -1)
+        if k > 1, normTopkProb {
+            scores = scores / scores.sum(axis: -1, keepDims: true)
+        }
+        scores = scores * routedScalingFactor
 
         return (inds, scores)
     }
@@ -323,7 +320,7 @@ class DeepseekV3MoE: Module, UnaryLayer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (indices, scores) = gate(x)
         var y = switchMLP(x, indices)
-        y = weightedExpertSum(y, scores)
+        y = weightedExpertSum(y, scores).asType(y.dtype)
 
         if let shared = sharedExperts {
             y = y + shared(x)
